@@ -1,0 +1,21 @@
+# 运行时数据（数据库、上传文件、导出、向量库）
+/data/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Streamlit 本地配置缓存
+.streamlit/secrets.toml
+
+# 敏感配置
+.env
+
+# 系统垃圾文件
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 注意：versions/ 版本快照目录需要入库，不要忽略
