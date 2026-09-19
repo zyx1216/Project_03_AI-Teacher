@@ -222,7 +222,7 @@ def _student_list_panel():
 
     edited_df = st.data_editor(
         initial_df,
-        num_rows="dynamic",
+        num_rows="fixed",
         hide_index=True,
         key="student_editor_main",
         column_order=["姓名", "学号", "班级", "性别", "标签", "备注"],
