@@ -201,7 +201,7 @@ def _student_list_panel():
             "姓名": s.name,
             "学号": s.student_no or "",
             "班级": s.class_name or "",
-            "性别": s.gender or "",
+            "性别": s.gender if s.gender in ("男", "女") else None,
             "标签": s.tags or "",
             "备注": s.remark or "",
         } for s in students])
@@ -230,7 +230,8 @@ def _student_list_panel():
             "学号": st.column_config.TextColumn("学号"),
             "班级": st.column_config.TextColumn("班级"),
             "性别": st.column_config.SelectboxColumn(
-                "性别", options=["", "男", "女"], required=False),
+                "性别", options=["男", "女"], required=False,
+                help="留空表示未设置"),
             "标签": st.column_config.TextColumn("标签", help="多个标签可用逗号分隔"),
             "备注": st.column_config.TextColumn("备注"),
         },
@@ -339,20 +340,14 @@ def _new_exam_dialog():
 
         st.markdown("**学科满分设置**")
         rows = st.session_state[rows_key]
-        delete_rid = _render_full_score_rows("new_exam", rows)
-        add_clicked = st.form_submit_button("➕ 添加学科")
+        _render_full_score_rows("new_exam", rows, rows_key)
+        st.form_submit_button(
+            "➕ 添加学科", on_click=_add_full_score_row,
+            args=(rows_key, "new_exam"))
         cc1, cc2 = st.columns(2)
         submitted = cc1.form_submit_button("创建", type="primary")
         cancelled = cc2.form_submit_button("取消")
 
-    if add_clicked:
-        _sync_full_score_rows("new_exam", rows)
-        next_rid = max((r["rid"] for r in rows), default=0) + 1
-        rows.append({"rid": next_rid, "subject": "", "score": 100.0})
-        st.rerun()
-    if delete_rid is not None:
-        st.session_state[rows_key] = [r for r in rows if r["rid"] != delete_rid]
-        st.rerun()
     if submitted:
         _sync_full_score_rows("new_exam", rows)
         if not name.strip():
@@ -377,9 +372,24 @@ def _new_exam_dialog():
         st.rerun()
 
 
-def _render_full_score_rows(scope: str, rows: list[dict]) -> int | None:
-    """渲染“学科 + 满分 + 删除”逐行编辑器，返回本次点击删除的行 ID。"""
-    delete_rid = None
+def _add_full_score_row(rows_key: str, scope: str):
+    """表单回调：先同步当前输入，再追加一空行，供本次提交后的重跑直接渲染。"""
+    rows = st.session_state.get(rows_key, [])
+    _sync_full_score_rows(scope, rows)
+    next_rid = max((r["rid"] for r in rows), default=0) + 1
+    rows.append({"rid": next_rid, "subject": "", "score": 100.0})
+    st.session_state[rows_key] = rows
+
+
+def _delete_full_score_row(rows_key: str, scope: str, rid: int):
+    """表单回调：先同步其他输入，再删除指定行。"""
+    rows = st.session_state.get(rows_key, [])
+    _sync_full_score_rows(scope, rows)
+    st.session_state[rows_key] = [r for r in rows if r["rid"] != rid]
+
+
+def _render_full_score_rows(scope: str, rows: list[dict], rows_key: str) -> None:
+    """渲染“学科 + 满分 + 删除”逐行编辑器。"""
     if rows:
         h1, h2, h3 = st.columns([3, 2, 1])
         h1.caption("学科")
@@ -394,12 +404,11 @@ def _render_full_score_rows(scope: str, rows: list[dict]) -> int | None:
         c2.number_input("满分", min_value=1.0, value=float(row.get("score") or 100.0),
                         step=10.0, key=f"full_score_{scope}_{rid}",
                         label_visibility="collapsed")
-        if c3.form_submit_button("🗑️", key=f"full_delete_{scope}_{rid}",
-                                help="删除这一学科"):
-            delete_rid = rid
+        c3.form_submit_button(
+            "🗑️", key=f"full_delete_{scope}_{rid}", help="删除这一学科",
+            on_click=_delete_full_score_row, args=(rows_key, scope, rid))
     if not rows:
         st.caption("还没有学科，点下方按钮添加。")
-    return delete_rid
 
 
 def _sync_full_score_rows(scope: str, rows: list[dict]) -> None:
@@ -472,20 +481,14 @@ def _exam_manage_panel():
         with st.form(f"edit_full_scores_{eid}"):
             st.markdown("**学科满分设置**")
             rows = st.session_state[rows_key]
-            delete_rid = _render_full_score_rows(f"exam_{eid}", rows)
-            add_clicked = st.form_submit_button("➕ 添加学科")
+            _render_full_score_rows(f"exam_{eid}", rows, rows_key)
+            st.form_submit_button(
+                "➕ 添加学科", on_click=_add_full_score_row,
+                args=(rows_key, f"exam_{eid}"))
             cc1, cc2 = st.columns(2)
             save_clicked = cc1.form_submit_button("💾 保存满分")
             del_clicked = cc2.form_submit_button("🗑️ 删除该考试（含全部成绩）")
 
-        if add_clicked:
-            _sync_full_score_rows(f"exam_{eid}", rows)
-            next_rid = max((r["rid"] for r in rows), default=0) + 1
-            rows.append({"rid": next_rid, "subject": "", "score": 100.0})
-            st.rerun()
-        if delete_rid is not None:
-            st.session_state[rows_key] = [r for r in rows if r["rid"] != delete_rid]
-            st.rerun()
         if save_clicked:
             _sync_full_score_rows(f"exam_{eid}", rows)
             try:

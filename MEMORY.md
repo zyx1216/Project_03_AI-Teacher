@@ -12,6 +12,9 @@
   - `@st.dialog` 弹窗内只要有按钮触发 `st.rerun()`，外层就不能只在“打开按钮点击当帧”调用弹窗函数；必须用持久状态（如 `hw_new_dialog_open`）在后续每次 rerun 继续挂载弹窗。
   - Streamlit `st.data_editor` 编辑数据库表时，要在数据里保留隐藏业务 ID（如“学生ID”），保存时靠 ID 定位记录；不能用表格行号，筛选、排序或新增行后行号会错。
   - AppTest 会把 `st.data_editor` 暴露在 `at.dataframe`，不能用普通 dataframe 的编辑 API 模拟输入；保存规则应主要用服务层测试覆盖。
+  - 【发布后补丁】弹窗内“切换选项就重渲染弹窗内容”的正确做法是普通按钮/表单提交按钮用 `on_click` 回调改 state，**回调外不要再手动 `st.rerun()`**：手动整页 rerun 会把 dialog 整体卸载再由持久 state 重挂，肉眼就是“闪退再出现”。只有“创建成功/取消”这种需要真正关闭弹窗的场景才整页 rerun。`st.rerun(scope="fragment")` 在整页运行上下文或表单提交里会直接抛 `StreamlitInvalidLayoutContextError`，不能用来解决这个问题。
+  - 【发布后补丁】`st.data_editor` 的 `SelectboxColumn` 不要把空字符串 `""` 放进 options，也不要用空字符串当“未设置”的初值：空串既是空值又是合法选项，glide-data-grid 切换时会抛 `Failed to execute 'removeChild'`。正确做法是 options 只放真实值（如男/女），未设置一律用 `None`；这个 DOM 报错 AppTest 抓不到，必须真实浏览器验证。
+  - 本机无 Chrome、无 Playwright/Selenium 时，可用系统自带 Edge（Chromium）加 `--remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir=临时目录` 起服务，再用 conda 里已装的 websocket-client 直连 CDP（HTTP /json 取 page 的 webSocketDebuggerUrl），用 `Runtime.evaluate` 执行 JS、`Input.dispatchMouseEvent/KeyEvent` 模拟真实输入、`Page.captureScreenshot` 截图；验证“闪退”要用 setInterval 16ms 高频采样弹窗文本是否消失，MutationObserver 在整页 rerun 下会误报。
 
 ## v1.2（全科学科切换架构）新增
 - 架构决策（2026-09-19）：

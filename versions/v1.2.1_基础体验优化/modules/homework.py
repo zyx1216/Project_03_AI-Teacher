@@ -67,6 +67,14 @@ def _read_prompt(filename: str) -> str:
 # ---------------------------------------------------------------------------
 
 @st.dialog("新建作业 / 试卷", width="large")
+def _choose_new_homework_type(hw_type: str):
+    """类型按钮回调：在弹窗 fragment 本次重跑前写好选中类型。"""
+    st.session_state["hw_new_type"] = hw_type
+    # 换一次控件 key：新类型首次渲染用自己的默认值，也避开状态冲突警告。
+    st.session_state["hw_new_dialog_nonce"] = st.session_state.get(
+        "hw_new_dialog_nonce", 0) + 1
+
+
 def _new_homework_dialog():
     """弹窗：选类型（emoji 网格）→ 填参数 → 可选模板 → 创建。"""
     st.markdown("**选择作业类型**")
@@ -74,15 +82,12 @@ def _new_homework_dialog():
     hw_type = st.session_state.get("hw_new_type", "after_class")
     for i, key in enumerate(_TYPE_KEYS):
         active = key == hw_type
-        # 选中态蓝色高亮；切换类型后依靠 hw_new_dialog_open 在 rerun 后继续挂载弹窗。
-        if cols[i].button(
-                _TYPE_OPTION_LABELS[key], key=f"type_btn_{key}",
-                use_container_width=True, type=("primary" if active else "secondary")):
-            st.session_state["hw_new_type"] = key
-            # 换一次控件 key：新类型首次渲染用自己的默认值，也避开状态冲突警告。
-            st.session_state["hw_new_dialog_nonce"] = st.session_state.get(
-                "hw_new_dialog_nonce", 0) + 1
-            st.rerun()
+        # 不能在按钮返回 True 后手动 st.rerun()：那会造成整页卸载、弹窗重挂。
+        # on_click 会在本次弹窗局部重跑前执行，刚好让新类型参与本轮渲染。
+        cols[i].button(
+            _TYPE_OPTION_LABELS[key], key=f"type_btn_{key}",
+            use_container_width=True, type=("primary" if active else "secondary"),
+            on_click=_choose_new_homework_type, args=(key,))
 
     defaults = hw_svc.DEFAULT_PARAMS[hw_type]
     nonce = st.session_state.get("hw_new_dialog_nonce", 0)

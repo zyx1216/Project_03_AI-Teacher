@@ -441,6 +441,10 @@ def test_student_editor_and_trend_controls_isolated(tmp_path):
     assert "学生ID" in editor.value.columns
 
     # st.tabs 会一次性渲染全部内容，所以无需手动切换到第 4 个 tab。
+    # 性别列未设置时必须是空值 None，不能是空字符串（空字符串会触发 glide-data-grid 下拉 DOM 报错）。
+    gender_vals = editor.value["性别"].tolist()
+    assert all(v is None or (isinstance(v, float) and v != v) for v in gender_vals)
+    assert "" not in gender_vals
     subject_box = next(x for x in at.multiselect if x.key == "student_trend_subjects")
     assert subject_box.value == ["数学"]
     chart_type = next(x for x in at.radio if x.key == "student_trend_chart_type")
@@ -657,3 +661,4 @@ def test_lesson_materials_web_link_renders_with_data_isolated(tmp_path):
     assert "网页链接" in markdown_text
     assert "https://example.com/math-article" in caption_text
     assert any(b.label == "建立向量索引" for b in at.button)
+
