@@ -231,9 +231,8 @@ def _student_list_panel():
             "姓名": st.column_config.TextColumn("姓名", required=True, width="medium"),
             "学号": st.column_config.TextColumn("学号"),
             "班级": st.column_config.TextColumn("班级"),
-            "性别": st.column_config.SelectboxColumn(
-                "性别", options=["男", "女"], required=False,
-                help="留空表示未设置"),
+            "性别": st.column_config.TextColumn(
+                "性别", help="输入男或女"),
             "标签": st.column_config.TextColumn("标签", help="多个标签可用逗号分隔"),
             "备注": st.column_config.TextColumn("备注"),
         },
