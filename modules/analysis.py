@@ -190,14 +190,8 @@ def _student_list_panel():
     class_filter = c1.selectbox("按班级筛选", ["全部"] + classes)
     keyword = c2.text_input("搜索姓名或学号")
 
-    # 表格 key 固定：不把筛选/搜索拼进 key，避免组件重建引发表格 DOM 冲突。
-    # 筛选或搜索确实变化时，主动丢弃编辑器缓存，让表格按新数据重建。
-    filter_sig = f"{class_filter}|{keyword.strip()}"
-    last_sig = st.session_state.get("student_editor_filter_sig")
-    if last_sig is not None and last_sig != filter_sig:
-        st.session_state.pop("student_editor_main", None)
-    st.session_state["student_editor_filter_sig"] = filter_sig
-
+    # 表格 key 固定，筛选/搜索变化时不主动 pop key，避免组件重建引发表格 DOM 冲突。
+    # data_editor 会自然合并新数据到已有状态中。
     with SessionLocal() as session:
         students = ss.list_students(
             session,
@@ -269,7 +263,6 @@ def _student_list_panel():
                         save_session, rows, pending_ids | retained_ids)
                     save_session.commit()
                 st.session_state.pop("student_delete_pending", None)
-                st.session_state.pop("student_editor_main", None)
                 st.session_state["student_editor_version"] = st.session_state.get(
                     "student_editor_version", 0) + 1
                 st.success(
@@ -287,7 +280,6 @@ def _student_list_panel():
                 result = ss.sync_students(save_session, rows, existing_ids)
                 save_session.commit()
             st.session_state.pop("student_save_pending", None)
-            st.session_state.pop("student_editor_main", None)
             st.session_state["student_editor_version"] = st.session_state.get(
                 "student_editor_version", 0) + 1
             st.success(
