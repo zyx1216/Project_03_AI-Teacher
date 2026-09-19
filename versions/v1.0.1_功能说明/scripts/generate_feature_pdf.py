@@ -38,6 +38,15 @@ FONT_BOLD = Path(r"C:\Windows\Fonts\msyhbd.ttc")
 PRIMARY = "#1F4E79"   # 与教案 PPT、图表一致的深蓝
 HEADER_BG = "#DEEAF6"  # 表头浅蓝
 
+# PyMuPDF Story 对 HTML table 的列宽支持不稳定，总览表先由 Story 预留固定高度，
+# 渲染后再手动绘制，保证“核心交付”宽、版本/日期/数据表窄。
+OVERVIEW_MARKER = "@@OVERVIEW_TABLE@@"
+OVERVIEW_HEIGHT = 196
+OVERVIEW_HEADER_HEIGHT = 26
+OVERVIEW_ROW_HEIGHT = 34
+OVERVIEW_COL_WIDTHS = (42, 76, 112, 202, 42)
+OVERVIEW_HEADERS = ("版本", "日期", "阶段", "核心交付", "数据表")
+
 # ---------------------------------------------------------------------------
 # 版本功能数据（整理自 CHANGELOG：只记“功能”，不记测试数/已知取舍/文件清单）
 # 字段：id 版本号 / when 日期 / stage 阶段名 / tables 当时数据表数 /
@@ -204,14 +213,8 @@ h3 { font-family: yhb; font-size: 11pt; color: #333; margin: 10px 0 4px 0;
 .subtitle { font-family: yhb; font-size: 14pt; color: #555; margin-bottom: 26px; }
 .meta { font-size: 10pt; color: #666; line-height: 2; }
 .lead { font-size: 10.5pt; color: #444; margin: 14px 0; }
-table { border-collapse: collapse; width: 100%%; margin: 8px 0 4px 0;
-        page-break-inside: auto; }
-th, td { border: 1px solid #9aa7b4; padding: 5px 7px; vertical-align: top; }
-th { background: %HEADER_BG%; font-family: yhb; text-align: left; }
-.overview td:first-child, .overview th:first-child { white-space: nowrap; width: 12%%; }
-.overview td:nth-child(2) { white-space: nowrap; width: 13%%; }
-.overview td:nth-child(3) { width: 18%%; }
-.overview td:last-child { white-space: nowrap; width: 9%%; text-align: center; }
+.overview-title { page-break-before: always; }
+.overview-slot { width: 100%%; height: %OVERVIEW_HEIGHT%px; margin: 8px 0 4px 0; }
 ul { margin: 2px 0 8px 0; padding-left: 20px; }
 li { margin: 2px 0; }
 .section { page-break-inside: auto; }
@@ -230,6 +233,7 @@ def _build_html() -> str:
     """根据 VERSIONS 常量拼出完整 HTML。"""
     style = (CSS.replace("%PRIMARY%", PRIMARY)
                 .replace("%HEADER_BG%", HEADER_BG)
+                .replace("%OVERVIEW_HEIGHT%", str(OVERVIEW_HEIGHT))
                 .replace("%%", "%"))
 
     today = date.today().isoformat()
@@ -248,22 +252,9 @@ def _build_html() -> str:
         "运行环境：本地单机（Windows + Python 3.11），数据保存在本机 data 目录"
         "</div></div>")
 
-    # 2) 版本总览表
-    parts.append("<h2>一、版本总览</h2>")
-    parts.append(
-        "<table class='overview'><tr>"
-        "<th>版本</th><th>日期</th><th>阶段</th><th>核心交付</th><th>数据表</th>"
-        "</tr>")
-    for v in VERSIONS:
-        parts.append(
-            "<tr>"
-            f"<td><b>{_esc(v['id'])}</b></td>"
-            f"<td>{_esc(v['when'])}</td>"
-            f"<td>{_esc(v['stage'].split(' · ', 1)[-1])}</td>"
-            f"<td>{_esc(v['core'])}</td>"
-            f"<td>{_esc(v['tables'])}</td>"
-            "</tr>")
-    parts.append("</table>")
+    # 2) 版本总览表：这里只留固定高度占位，Story 分页后由 _draw_overview_table 补绘
+    parts.append("<h2 class='overview-title'>一、版本总览</h2>")
+    parts.append(f"<div class='overview-slot'>{OVERVIEW_MARKER}</div>")
     parts.append(
         "<p class='kicker'>说明：v0.1–v0.3 均为 9 张表；v0.4 新增作业每题作答表增至 10 张；"
         "v1.0 新增教学反思、评语模板、学生评语 3 张表，增至 13 张。</p>")
@@ -292,6 +283,122 @@ def _build_html() -> str:
 
     parts.append("</body></html>")
     return "".join(parts)
+
+
+
+OVERVIEW_CELL_CSS = """
+@font-face { font-family: yh; src: url(regular.ttc); }
+@font-face { font-family: yhb; src: url(bold.ttc); font-weight: bold; }
+body { margin: 0; font-family: yh; font-size: 9pt; line-height: 1.25; color: #222; }
+.cell { box-sizing: border-box; width: 100%; height: 100%; padding: 4px 6px;
+        overflow: hidden; }
+.bold { font-family: yhb; }
+.center { text-align: center; }
+.nowrap { white-space: nowrap; }
+"""
+
+
+def _overview_rows():
+    """整理总览表五行数据，保持顺序与 VERSIONS 一致。"""
+    return [
+        (v["id"], v["when"], v["stage"].split(" · ", 1)[-1],
+         v["core"], v["tables"])
+        for v in VERSIONS
+    ]
+
+
+def _put_overview_cell(page, rect, text, archive, classes=""):
+    """在固定表格单元格里写可搜索文本，并在内容放不下时直接失败。"""
+    cell_html = f"<div class='cell {classes}'>{_esc(text)}</div>"
+    spare_height, scale = page.insert_htmlbox(
+        rect, cell_html, css=OVERVIEW_CELL_CSS, archive=archive)
+    if spare_height < 0 or scale < 0.999:
+        raise RuntimeError(
+            f"版本总览单元格内容放不下：{text[:20]}；"
+            f"spare_height={spare_height}, scale={scale}")
+
+
+def _draw_overview_table(doc, archive) -> None:
+    """
+    在 Story 预留位置上手动绘制版本总览表。
+
+    PyMuPDF Story 的 table-layout/colgroup/百分比列宽在当前版本中不会稳定生效，
+    自动布局会把窄列压成竖排、把“核心交付”放到过宽；这里显式锁定列坐标。
+    """
+    matches = []
+    for page in doc:
+        for rect in page.search_for(OVERVIEW_MARKER):
+            matches.append((page, rect))
+    if len(matches) != 1:
+        raise RuntimeError(f"版本总览占位标记应恰好出现一次，实际找到 {len(matches)} 处")
+
+    page, marker = matches[0]
+    page.add_redact_annot(marker, fill=(1, 1, 1))
+    page.apply_redactions()
+
+    x0 = marker.x0
+    table_width = sum(OVERVIEW_COL_WIDTHS)
+    # Story 正文区在页面默认 body margin 后从 60.5pt 开始，右边界为 534.5pt；
+    # 总览表与正文文字块左右对齐，不能直接按纸张边距 50pt 推 495pt。
+    expected_width = page.rect.width - 2 * x0
+    if abs(table_width - expected_width) > 0.5:
+        raise RuntimeError(
+            f"版本总览列宽合计 {table_width} 与正文宽度 {expected_width} 不一致")
+    x1 = x0 + table_width
+    y0 = marker.y0
+    heights = [OVERVIEW_HEADER_HEIGHT] + [OVERVIEW_ROW_HEIGHT] * len(VERSIONS)
+    if sum(heights) != OVERVIEW_HEIGHT:
+        raise RuntimeError("版本总览行高合计与占位高度不一致")
+    y1 = y0 + OVERVIEW_HEIGHT
+
+    x_edges = [x0]
+    for width in OVERVIEW_COL_WIDTHS:
+        x_edges.append(x_edges[-1] + width)
+
+    border_color = (0.604, 0.655, 0.706)
+    header_fill = (0.871, 0.918, 0.965)
+    page.draw_rect(
+        fitz.Rect(x0, y0, x1, y0 + OVERVIEW_HEADER_HEIGHT),
+        color=None, fill=header_fill, width=0)
+
+    y = y0
+    for height in heights:
+        page.draw_line(fitz.Point(x0, y), fitz.Point(x1, y),
+                       color=border_color, width=0.6)
+        y += height
+    page.draw_line(fitz.Point(x0, y1), fitz.Point(x1, y1),
+                   color=border_color, width=0.6)
+    for x in x_edges:
+        page.draw_line(fitz.Point(x, y0), fitz.Point(x, y1),
+                       color=border_color, width=0.6)
+
+    y = y0
+    for column_index, header in enumerate(OVERVIEW_HEADERS):
+        if column_index in (0, 1, 4):
+            classes = "bold center nowrap"
+        else:
+            classes = "bold"
+        _put_overview_cell(
+            page,
+            fitz.Rect(x_edges[column_index], y,
+                      x_edges[column_index + 1], y + OVERVIEW_HEADER_HEIGHT),
+            header, archive, classes)
+    y += OVERVIEW_HEADER_HEIGHT
+
+    for row in _overview_rows():
+        for column_index, value in enumerate(row):
+            if column_index == 0:
+                classes = "bold center nowrap"
+            elif column_index in (1, 4):
+                classes = "center nowrap"
+            else:
+                classes = ""
+            _put_overview_cell(
+                page,
+                fitz.Rect(x_edges[column_index], y,
+                          x_edges[column_index + 1], y + OVERVIEW_ROW_HEIGHT),
+                value, archive, classes)
+        y += OVERVIEW_ROW_HEIGHT
 
 
 def _check_fonts() -> None:
@@ -332,8 +439,9 @@ def build_feature_pdf(output_path) -> Path:
         writer.end_page()
     writer.close()
 
-    # 重新打开做字体子集化 + 压缩后另存为目标文件
+    # 重新打开后补绘固定列宽总览表，再做字体子集化 + 压缩
     doc = fitz.open(str(tmp_path))
+    _draw_overview_table(doc, archive)
     doc.subset_fonts()
     doc.save(str(output_path), garbage=4, deflate=True)
     doc.close()

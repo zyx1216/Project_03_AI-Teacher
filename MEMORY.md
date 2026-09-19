@@ -13,6 +13,7 @@
   - Story 的 place 用内容矩形（`mediabox + (50,56,-50,-56)`），begin_page 用完整 mediabox；dev 没有 .rect 属性。
   - PyMuPDF 提取 Story 生成的中文 PDF 时，粗体和中英混排之间会插 `\xa0` 不间断空格，断言文本要先 `re.sub(r"\s+","",text)` 再匹配，别误判成缺内容。
   - CSS 百分号在 Python 字符串 `.replace("%%","%")` 模板里要转义成 %%（width:100%%），和 %PRIMARY% 占位替换一起做。
+  - **PyMuPDF Story 的 HTML table 列宽不可靠**：`width:%`、`table-layout:fixed`、`colgroup/col width` 都可能不被采纳，窄列会竖排、宽列占满。固定列表格不要继续和 CSS 较劲：正文仍用 Story，表格位置放固定高度占位 marker，渲染后 `search_for(marker)` 定位，redaction 抹掉 marker，再 `draw_line/draw_rect + insert_htmlbox` 手动绘制；用线坐标回归测试锁死列边界。
 
 ## 阶段4（v1.0 正式版）新增
 - 架构决策（2026-09-19）：
