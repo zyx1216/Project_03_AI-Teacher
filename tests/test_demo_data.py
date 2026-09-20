@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
-"""v1.2.4 全科 demo 数据测试：内存库构建 + Excel 产物校验，不碰真实库。"""
+"""v1.4.2 后 demo 数据测试：3 班 90 人、10 场考试、9 科完整成绩，不碰真实库。"""
 
-from sqlalchemy import create_engine
+import json
+from collections import Counter
+
+import pandas as pd
+from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker
 
 from models.models import Base, Exam, Score, Student
@@ -16,6 +20,9 @@ def _memory_session():
 
 
 def test_demo_constants():
+    assert demo.CLASSES == ["八年级1班", "八年级2班", "八年级3班"]
+    assert demo.STUDENTS_PER_CLASS == 30
+    assert len(demo.EXAMS) == 10
     assert len(demo.SUBJECTS) == 9
     assert set(demo.SUBJECTS) == set(demo.FULL_SCORES)
     assert demo.FULL_SCORES["数学"] == 150
@@ -25,35 +32,47 @@ def test_demo_constants():
         assert demo.FULL_SCORES[s] == 100
 
 
-def test_build_demo_data(session=None):
+def test_build_demo_data():
     session = _memory_session()
     stats = demo.build_demo_data(session)
     session.flush()
 
-    assert stats["students"] == 30
-    assert stats["exams"] == 3
-    # 30 人 × 9 科 × 3 场 = 810，其中 3 个缺考
-    assert stats["scores"] == 810 - 3
-    assert stats["absent"] == 3
+    assert stats == {
+        "students": 90,
+        "exams": 10,
+        "scores": 8100,
+        "absent": 0,
+    }
 
-    assert session.query(Student).count() == 30
-    exams = session.query(Exam).order_by(Exam.exam_date).all()
-    assert [e.name for e in exams] == ["第一次月考", "期中考试", "第二次月考"]
+    assert session.query(Student).count() == 90
+    class_counts = dict(
+        session.query(Student.class_name, func.count(Student.id))
+        .group_by(Student.class_name)
+        .all()
+    )
+    assert class_counts == {name: 30 for name in demo.CLASSES}
 
-    # 每场考试 9 科满分配置齐全
-    import json
+    exams = session.query(Exam).order_by(Exam.exam_date, Exam.id).all()
+    assert [e.name for e in exams] == [item[0] for item in demo.EXAMS]
+    assert [e.term for e in exams] == [item[2] for item in demo.EXAMS]
+
     for exam in exams:
         full = json.loads(exam.full_scores)
         assert set(full) == set(demo.SUBJECTS)
         assert full["数学"] == 150 and full["物理"] == 100
+        assert session.query(Score).filter(Score.exam_id == exam.id).count() == 810
+        subject_counts = dict(
+            session.query(Score.subject, func.count(Score.id))
+            .filter(Score.exam_id == exam.id)
+            .group_by(Score.subject)
+            .all()
+        )
+        assert subject_counts == {subject: 90 for subject in demo.SUBJECTS}
 
-    # 9 科都有成绩，缺考点确实存成 NULL
     subjects_in_db = {r[0] for r in session.query(Score.subject).distinct()}
     assert subjects_in_db == set(demo.SUBJECTS)
-    nulls = session.query(Score).filter(Score.score.is_(None)).count()
-    assert nulls == 3
+    assert session.query(Score).filter(Score.score.is_(None)).count() == 0
 
-    # 分数不超满分、不低于 0
     bad = session.query(Score).filter(
         Score.score.isnot(None),
         ((Score.subject.in_(["语文", "数学", "英语"])) & (Score.score > 150))
@@ -65,17 +84,17 @@ def test_build_demo_data(session=None):
 def test_write_demo_excel(tmp_path):
     out = demo.write_demo_excel(tmp_path)
     assert (out / "学生名单.xlsx").exists()
-    for exam_name, _d, _drift in demo.EXAMS:
-        path = out / f"成绩_{exam_name}.xlsx"
-        assert path.exists()
+    score_files = sorted(out.glob("成绩_*.xlsx"))
+    assert len(score_files) == 10
 
-    import pandas as pd
     students = pd.read_excel(out / "学生名单.xlsx")
-    assert len(students) == 30
-    df = pd.read_excel(out / "成绩_期中考试.xlsx")
-    # 9 科列 + 姓名/班级
-    for s in demo.SUBJECTS:
-        assert s in df.columns
-    # 缺考点在 Excel 里也是空
-    absent = df[df["姓名"] == "学生05"]["数学"]
-    assert absent.isna().all()
+    assert len(students) == 90
+    assert Counter(students["班级"]) == Counter({class_name: 30 for class_name in demo.CLASSES})
+
+    for idx, (_name, _date, _term, _drift) in enumerate(demo.EXAMS, start=1):
+        path = out / f"成绩_{idx:02d}_{demo.EXAMS[idx - 1][2]}_{demo.EXAMS[idx - 1][0]}.xlsx"
+        df = pd.read_excel(path)
+        assert len(df) == 90
+        assert list(df.columns) == ["姓名", "班级", *demo.SUBJECTS]
+        assert df[demo.SUBJECTS].notna().all().all()
+
