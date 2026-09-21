@@ -1,0 +1,4 @@
+# 仅开发/测试需要，运行程序不用装
+# 安装：pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==9.1.1
