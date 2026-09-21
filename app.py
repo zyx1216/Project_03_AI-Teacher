@@ -22,10 +22,13 @@ import config
 from utils.db import init_db
 from modules import analysis, calendar, dashboard, homework, lesson_plan, settings
 from utils.keyboard_shortcuts import shortcut_js
+from utils import material_service
 import streamlit.components.v1 as components
 
 # 启动时确保目录存在、13 张表就绪（幂等操作，不会清空数据）
 init_db()
+# 启动时把已保存的原始资料文件同步到 Streamlit 静态目录。
+material_service.sync_original_static_files()
 
 # 页面基础设置（标题、图标固定，不再随学科切换）
 st.set_page_config(
