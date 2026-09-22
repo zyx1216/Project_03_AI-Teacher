@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 备课页面（v0.3）。
 
@@ -1082,7 +1082,7 @@ def tab_question_gen():
     # 清空动作必须在下一轮创建控件前完成，不能在控件创建后直接改 widget 值。
     if st.session_state.pop("_pending_reset_question_config", False):
         st.session_state[QUESTION_TASK_ROWS_KEY] = pd.DataFrame(
-            columns=["题型", "难度", "数量"])
+            columns=["题型", "难度", "数量", "删除"])
         st.session_state.pop(QUESTION_TASK_EDITOR_KEY, None)
         st.session_state["question_gen_material"] = None
         st.session_state["question_gen_kps"] = []
@@ -1144,30 +1144,58 @@ def tab_question_gen():
                 st.error(f"旧待定配置迁移失败：{exc}")
 
     st.markdown("**当前配置**")
-    current_c1, current_c2 = st.columns(2)
     allowed_types = qs.question_type_options(grade, subject)
     if QUESTION_TASK_ROWS_KEY not in st.session_state:
         st.session_state[QUESTION_TASK_ROWS_KEY] = pd.DataFrame(
-            columns=["题型", "难度", "数量"])
+            columns=["题型", "难度", "数量", "删除"])
 
     material_id = _question_gen_material(subject)
     knowledge_points = _knowledge_point_picker(subject, material_id)
     st.caption("当前年级和学科可选题型：" + "、".join(allowed_types))
     st.caption("难度：1=基础，2=中等，3=拓展")
 
+    # 快速添加行：选择题型后点"添加一行"
+    add_c1, add_c2, add_c3 = st.columns([2, 1, 1])
+    quick_type = add_c1.selectbox("快速选择题型", allowed_types, key="quick_question_type")
+    quick_diff = add_c2.number_input("难度", min_value=1, max_value=3, value=2, step=1, key="quick_question_diff")
+    if add_c3.button("➕ 添加一行", key="add_question_row"):
+        current_rows = st.session_state[QUESTION_TASK_ROWS_KEY].to_dict("records")
+        current_rows.append({"题型": quick_type, "难度": int(quick_diff), "数量": 1, "删除": False})
+        st.session_state[QUESTION_TASK_ROWS_KEY] = pd.DataFrame(current_rows, columns=["题型", "难度", "数量", "删除"])
+        st.rerun()
+
     current_editor_df = st.data_editor(
         st.session_state[QUESTION_TASK_ROWS_KEY],
-        num_rows="dynamic", key=QUESTION_TASK_EDITOR_KEY, width="stretch",
+        key=QUESTION_TASK_EDITOR_KEY, width="stretch",
         column_config={
             "题型": st.column_config.TextColumn("题型", required=False),
             "难度": st.column_config.NumberColumn(
                 "难度", min_value=1, max_value=3, step=1),
             "数量": st.column_config.NumberColumn(
                 "数量", min_value=1, max_value=100, step=1),
+            "删除": st.column_config.CheckboxColumn("删除", default=False),
         })
-    extra = st.text_input(
+
+    btn1, btn2 = st.columns(2)
+    extra = btn1.text_input(
         "其他要求（可选）", key="question_gen_extra",
         placeholder="如：结合生活情境、不要超纲")
+    if btn2.button("🗑️ 删除勾选行", key="delete_question_rows"):
+        rows = _current_editor_rows(
+            st.session_state[QUESTION_TASK_ROWS_KEY], current_editor_df,
+            QUESTION_TASK_EDITOR_KEY).to_dict("records")
+        kept = []
+        for row in rows:
+            if bool(row.get("删除", False)):
+                continue
+            qtype = str(row.get("题型") or "").strip()
+            if not qtype:
+                continue
+            kept.append({"题型": qtype, "难度": int(row.get("难度") or 2),
+                         "数量": int(row.get("数量") or 1), "删除": False})
+        st.session_state[QUESTION_TASK_ROWS_KEY] = pd.DataFrame(
+            kept, columns=["题型", "难度", "数量", "删除"])
+        st.rerun()
 
     if st.button("➕ 添加当前配置为任务", type="primary", key="add_current_question_tasks"):
         try:
