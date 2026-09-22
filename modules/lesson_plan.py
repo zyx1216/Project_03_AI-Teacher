@@ -459,7 +459,29 @@ def _preview_pending():
     pname, ptype, pgrade = data["name"], data["file_type"], data["grade"]
     pfile, text, pending_subject = data["source_file"], data["text"], data["subject"]
     source_bytes = data.get("source_bytes")
-    chapters = data.get("chapters") or material.split_chapters(text)
+
+    # PDF 导入时自动调用 AI 识别章节（只识别一次，失败自动回退正则）
+    if ptype == "pdf" and source_bytes and not data.get("auto_detected"):
+        data["auto_detected"] = True  # 标记已尝试自动识别，避免重复
+        try:
+            with st.spinner("🤖 AI 正在识别教材章节，请稍候..."):
+                detected = material.detect_pdf_chapters(
+                    source_bytes, llm_client.chat_content)
+                if detected:
+                    chapters = material.build_chapters_from_pdf_pages(source_bytes, detected)
+                    data["chapters"] = chapters
+                    st.success(f"✅ AI 识别到 {len(chapters)} 个章节，可在下方表格中调整。")
+                else:
+                    chapters = material.split_chapters(text)
+                    st.info("AI 未识别到明确章节，已使用常规方式切分，可手动调整。")
+        except ValueError as exc:
+            chapters = material.split_chapters(text)
+            st.info(f"AI 识别未成功（{exc}），已使用常规方式切分，可手动调整。")
+        except Exception as exc:
+            chapters = material.split_chapters(text)
+            st.info(f"AI 识别暂不可用，已使用常规方式切分，可手动调整。")
+    else:
+        chapters = data.get("chapters") or material.split_chapters(text)
 
     if ptype == "pdf" and source_bytes:
         st.info("如果 PDF 有内置书签，建议优先使用“📑 使用 PDF 书签”，章节通常更准确。")
