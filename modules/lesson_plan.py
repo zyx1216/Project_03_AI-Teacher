@@ -1513,7 +1513,7 @@ def _question_filters():
         returned = response.get("data") if hasattr(response, "get") else None
         returned_rows = returned.to_dict("records") if hasattr(returned, "to_dict") else []
         # 正确获取勾选的行（AgGrid返回的selected_rows）
-        selected_rows_data = response.get("selected_rows", []) if hasattr(response, "get") else []
+        selected_rows_data = response.get("selected_rows") or [] if hasattr(response, "get") else []
         selected_ids = [int(row.get("question_id")) for row in selected_rows_data
                         if row.get("question_id") is not None]
 
