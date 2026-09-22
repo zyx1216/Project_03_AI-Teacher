@@ -184,23 +184,25 @@ def _format_answer(answer: str, question_type: str = "solution") -> str:
     return answer
 
 
-def _render_question(question: dict, index: int):
-    """完整渲染一道题：标题、题干、答案、解析、知识点。"""
+def _render_question(question: dict, index: int, use_container: bool = True):
+    """完整渲染一道题：标题、题干、答案、解析、知识点。
+    use_container=False时不使用外层容器（避免批量查看时双层嵌套导致React错误）。
+    """
     qtype = question.get("question_type", "solution")
     type_label = TYPE_LABELS.get(qtype, "解答题")
     diff_label = DIFF_LABELS.get(question.get("difficulty", 2), "中等")
 
-    with st.container(border=True):
+    def _render_content():
         # 题目标题
         st.markdown(f"**第 {index} 题**　|　{type_label}　|　难度：{diff_label}")
-        st.divider()
+        st.markdown("---")
 
         # 题目内容
         content_text = _format_question_content(question.get("content", ""), qtype)
         st.markdown(content_text)
 
         # 答案和解析
-        st.divider()
+        st.markdown("---")
         answer_text = _format_answer(question.get("answer", ""), qtype)
         st.markdown(f"**答案：** {answer_text}")
 
@@ -212,6 +214,13 @@ def _render_question(question: dict, index: int):
             if isinstance(kps, list):
                 kps = "、".join(str(k) for k in kps)
             st.caption(f"考察知识点：{kps}")
+
+    if use_container:
+        with st.container(border=True):
+            _render_content()
+    else:
+        _render_content()
+        st.markdown("---")
 
 
 def _render_math(text: str):
@@ -1512,8 +1521,14 @@ def _question_filters():
 
         returned = response.get("data") if hasattr(response, "get") else None
         returned_rows = returned.to_dict("records") if hasattr(returned, "to_dict") else []
-        # 正确获取勾选的行（AgGrid返回的selected_rows）
-        selected_rows_data = response.get("selected_rows") or [] if hasattr(response, "get") else []
+        # 正确获取勾选的行（AgGrid返回的selected_rows，可能是DataFrame或列表）
+        selected_rows_raw = response.get("selected_rows") if hasattr(response, "get") else None
+        if selected_rows_raw is None:
+            selected_rows_data = []
+        elif hasattr(selected_rows_raw, "to_dict"):
+            selected_rows_data = selected_rows_raw.to_dict("records")
+        else:
+            selected_rows_data = list(selected_rows_raw)
         selected_ids = [int(row.get("question_id")) for row in selected_rows_data
                         if row.get("question_id") is not None]
 
@@ -1584,7 +1599,7 @@ def _question_filters():
                         "answer": q.answer,
                         "analysis": q.analysis,
                         "knowledge_points": qs.knowledge_points_list(q),
-                    }, idx)
+                    }, idx, use_container=False)
                 if st.button("关闭批量查看", key="close_batch_view"):
                     st.session_state.pop("bank_batch_view_ids", None)
                     st.rerun()
