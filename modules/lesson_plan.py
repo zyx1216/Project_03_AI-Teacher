@@ -1421,12 +1421,7 @@ def _question_history_panel():
         if st.session_state.get("view_history_questions_id") == item["id"] and snapshot:
             with st.container(border=True):
                 for i, q in enumerate(snapshot, start=1):
-                    st.markdown(
-                        f"**{i}. {q.get('subject','')}·"
-                        f"{q.get('question_type','')}·"
-                        f"{DIFF_LABELS.get(q.get('difficulty',2), q.get('difficulty'))}**")
-                    _render_math(q.get("content", ""))
-                    st.caption(f"答案：{q.get('answer','')}")
+                    _render_question(q, i)
 
     pg1, pg2, pg3 = st.columns(3)
     if pg1.button("⬅️ 上一页", disabled=page <= 0, key="history_prev_page"):
@@ -1478,31 +1473,6 @@ def _question_filters():
             st.info("题库里还没有符合条件的题。可到“AI 出题”生成，或用下方入口导入。")
             return
 
-        # 批量审核放在显眼位置（表格上方）
-        ba1, ba2 = st.columns([1, 4])
-        if ba1.button("✅ 批量审核通过", type="primary", key="bank_batch_approve_top"):
-            st.session_state["bank_batch_open"] = True
-        if st.session_state.get("bank_batch_open"):
-            with st.container(border=True):
-                pending = [q for q in questions if q.status == "pending"]
-                if not pending:
-                    st.info("当前筛选结果里没有待审核题目。")
-                else:
-                    pending_map = {q.id: f"#{q.id} {q.content[:30]}" for q in pending}
-                    chosen = st.multiselect(
-                        "选择要通过的题目", list(pending_map.values()),
-                        key="bank_batch_approve_pick")
-                    if st.button("确认通过所选", type="primary",
-                                 disabled=not chosen,
-                                 key="bank_batch_approve_btn"):
-                        ids = [next(i for i, label in pending_map.items() if label == x)
-                               for x in chosen]
-                        n = qs.approve_questions(session, ids)
-                        session.commit()
-                        st.session_state.pop("bank_batch_open", None)
-                        st.session_state["bank_batch_last"] = f"已通过 {n} 道题。"
-                        st.rerun()
-
         ce1, ce2 = st.columns(2)
         if ce1.button("📄 导出习题卷（仅题目）"):
             data = qs.export_questions_word(
@@ -1542,13 +1512,57 @@ def _question_filters():
 
         returned = response.get("data") if hasattr(response, "get") else None
         returned_rows = returned.to_dict("records") if hasattr(returned, "to_dict") else []
+
+        # 批量操作按钮（表格下方，returned_rows已可用）
+        pending_count = len([q for q in questions if q.status == "pending"])
+        op1, op2, op3 = st.columns([1, 1, 3])
+        if op1.button("✅ 审核所选", type="primary", key="bank_batch_approve_bottom"):
+            selected_ids = qs.selected_question_ids(returned_rows)
+            if selected_ids:
+                n = qs.approve_questions(session, selected_ids)
+                session.commit()
+                st.success(f"已通过 {n} 道题。")
+                st.rerun()
+            else:
+                st.warning("请先在表格中勾选题目。")
+        if op2.button("👁️ 查看所选", key="bank_batch_view_bottom"):
+            selected_ids = qs.selected_question_ids(returned_rows)
+            if selected_ids:
+                st.session_state["bank_batch_view_ids"] = selected_ids
+                st.rerun()
+            else:
+                st.warning("请先在表格中勾选题目。")
+        if pending_count > 0:
+            op3.caption(f"当前有 {pending_count} 道待审核题目，在表格中勾选后点'审核所选'")
+
         clicked = qs.clicked_question_id(returned_rows)
         picked_id = clicked or st.session_state.get("bank_picked_id")
         if clicked:
             st.session_state["bank_picked_id"] = clicked
-        picked_q = next((q for q in questions if q.id == picked_id), questions[0])
-        st.session_state["bank_picked_id"] = picked_q.id
-        _question_detail(session, picked_q)
+
+        # 批量查看模式
+        batch_view_ids = st.session_state.get("bank_batch_view_ids", [])
+        if batch_view_ids:
+            with st.container(border=True):
+                st.markdown(f"**📖 批量查看（共 {len(batch_view_ids)} 题）**")
+                view_qs = [q for q in questions if q.id in batch_view_ids]
+                for idx, q in enumerate(view_qs, start=1):
+                    _render_question({
+                        "question_type": q.question_type,
+                        "difficulty": q.difficulty,
+                        "content": q.content,
+                        "answer": q.answer,
+                        "analysis": q.analysis,
+                        "knowledge_points": qs.knowledge_points_list(q),
+                    }, idx)
+                if st.button("关闭批量查看", key="close_batch_view"):
+                    st.session_state.pop("bank_batch_view_ids", None)
+                    st.rerun()
+        else:
+            # 单题查看
+            picked_q = next((q for q in questions if q.id == picked_id), questions[0])
+            st.session_state["bank_picked_id"] = picked_q.id
+            _question_detail(session, picked_q)
 
 def _question_detail(session, q):
     """单题详情：渲染、审核、编辑、删除（删除二次确认）。"""
@@ -1565,16 +1579,18 @@ def _question_detail(session, q):
             session.commit()
             st.rerun()
 
-        st.markdown("**题干**")
-        _render_math(q.content)
-        st.markdown("**答案**")
-        _render_math(q.answer)
-        if q.analysis:
-            st.markdown("**解析**")
-            _render_math(q.analysis)
+        # 用统一的题目渲染函数（针对不同题型优化排版）
+        _render_question({
+            "question_type": q.question_type,
+            "difficulty": q.difficulty,
+            "content": q.content,
+            "answer": q.answer,
+            "analysis": q.analysis,
+            "knowledge_points": kps,
+        }, 1)
+
         if q.error_points:
-            st.markdown("**易错点**")
-            _render_math(q.error_points)
+            st.markdown(f"**易错点：** {q.error_points}")
 
         with st.expander("✏️ 编辑此题"):
             e_content = st.text_area("题干", value=q.content, height=120,
