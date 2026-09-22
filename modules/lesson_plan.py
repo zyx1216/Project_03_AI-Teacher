@@ -184,6 +184,25 @@ def _format_answer(answer: str, question_type: str = "solution") -> str:
     return answer
 
 
+def _safe_markdown(text: str):
+    """安全渲染markdown：转义HTML特殊字符，保留$...$公式。"""
+    if not text:
+        return ""
+    # 临时替换$...$公式为占位符
+    import re as _re
+    placeholders = []
+    def _replace_math(match):
+        placeholders.append(match.group(0))
+        return f"__MATH_{len(placeholders)-1}__"
+    text = _re.sub(r"\$[^$]+\$", _replace_math, text)
+    # 转义HTML特殊字符
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 恢复公式
+    for i, ph in enumerate(placeholders):
+        text = text.replace(f"__MATH_{i}__", ph)
+    return text
+
+
 def _render_question(question: dict, index: int, use_container: bool = True):
     """完整渲染一道题：标题、题干、答案、解析、知识点。
     use_container=False时不使用外层容器（避免批量查看时双层嵌套导致React错误）。
@@ -197,17 +216,20 @@ def _render_question(question: dict, index: int, use_container: bool = True):
         st.markdown(f"**第 {index} 题**　|　{type_label}　|　难度：{diff_label}")
         st.markdown("---")
 
-        # 题目内容
+        # 题目内容（安全渲染，避免特殊字符导致React错误）
         content_text = _format_question_content(question.get("content", ""), qtype)
-        st.markdown(content_text)
+        safe_content = _safe_markdown(content_text)
+        st.markdown(safe_content)
 
         # 答案和解析
         st.markdown("---")
         answer_text = _format_answer(question.get("answer", ""), qtype)
-        st.markdown(f"**答案：** {answer_text}")
+        # 答案用代码格式显示，避免 > < 等特殊字符被markdown解析
+        st.markdown(f"**答案：** `{answer_text}`")
 
         if question.get("analysis"):
-            st.markdown(f"**解析：** {question['analysis']}")
+            safe_analysis = _safe_markdown(question['analysis'])
+            st.markdown(f"**解析：** {safe_analysis}")
 
         if question.get("knowledge_points"):
             kps = question["knowledge_points"]
