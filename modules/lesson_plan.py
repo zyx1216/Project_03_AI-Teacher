@@ -1017,9 +1017,9 @@ def tab_question_gen():
         st.session_state[QUESTION_TASK_ROWS_KEY], num_rows="dynamic",
         key=QUESTION_TASK_EDITOR_KEY, width="stretch",
         column_config={
-            "题型": st.column_config.SelectColumn(
+            "题型": st.column_config.SelectboxColumn(
                 "题型", options=allowed_types, required=True),
-            "难度": st.column_config.SelectColumn(
+            "难度": st.column_config.SelectboxColumn(
                 "难度", options=["基础", "中等", "拓展"], required=True),
             "数量": st.column_config.NumberColumn(
                 "数量", min_value=1, max_value=100, step=1, required=True),
