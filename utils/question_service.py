@@ -327,26 +327,165 @@ def export_questions_word(questions: list[Question], with_answer: bool,
 # ---------------------------------------------------------------------------
 
 # 面向出题界面的题型标签；数据库仍只保存四类。
+# 所有扩展题型最终归一为 choice（选择）/ fill（填空）/ judge（判断）/ solution（解答）
 EXTENDED_TYPE_ALIASES = {
     **TYPE_ALIASES,
+    # 解答题大类
     "证明": "solution", "证明题": "solution",
     "阅读理解": "solution", "阅读理解题": "solution",
-    "作文": "solution", "作文题": "solution",
+    "作文": "solution", "作文题": "solution", "书面表达": "solution",
     "材料分析": "solution", "材料分析题": "solution",
+    "解答": "solution", "解答题": "solution", "大题": "solution",
+    "计算": "solution", "计算题": "solution", "应用": "solution", "应用题": "solution",
+    "实验": "solution", "实验题": "solution", "实验探究题": "solution",
+    "简答": "solution", "简答题": "solution",
+    "论述": "solution", "论述题": "solution",
+    "辨析": "solution", "辨析题": "solution",
+    "推断": "solution", "推断题": "solution",
+    "工艺流程": "solution", "工艺流程题": "solution",
+    "有机推断": "solution", "有机推断与合成题": "solution",
+    "化学反应原理": "solution", "化学反应原理题": "solution",
+    "综合": "solution", "综合题": "solution",
+    "读图分析": "solution", "读图分析题": "solution",
+    "图表分析": "solution", "图表分析题": "solution",
+    "实验设计": "solution", "实验设计题": "solution",
+    "识图作答": "solution", "识图作答题": "solution",
+    "操作": "solution", "操作题": "solution",
+    "图形与几何": "solution", "图形与几何题": "solution",
+    "作图": "solution", "作图题": "solution",
+    "选考": "solution", "选考题": "solution",
+    "开放性": "solution", "开放性试题": "solution",
+    "实践探究": "solution", "实践探究题": "solution",
+    "古诗文默写": "fill", "默写": "fill",
+    "文言文阅读": "solution", "古代诗歌鉴赏": "solution", "诗歌鉴赏": "solution",
+    "现代文阅读": "solution", "论述类文本": "solution", "实用类文本": "solution", "文学类文本": "solution",
+    "语言文字运用": "solution", "补写句子": "solution", "压缩语段": "solution", "图文转换": "solution", "句式变换": "solution",
+    "看拼音写词语": "fill", "形近字辨析": "choice", "多音字辨析": "choice",
+    "选词填空": "fill", "词语搭配": "fill", "按课文内容填空": "fill",
+    "句子排序": "solution", "修改病句": "solution", "标点符号": "choice",
+    "看图写话": "solution", "任务驱动型作文": "solution", "材料作文": "solution",
+    "听力选择": "choice", "听力填空": "fill", "字母辨音": "choice",
+    "单词拼写": "fill", "完形填空": "fill", "语法填空": "fill", "短文填空": "fill",
+    "词汇运用": "fill", "句型转换": "solution", "补全对话": "solution",
+    "七选五": "choice", "短文改错": "solution", "应用文写作": "solution",
+    "读后续写": "solution", "概要写作": "solution", "小作文": "solution",
+    "多项选择": "choice", "多选题": "choice", "单项选择": "choice", "单选题": "choice",
+    "力学实验": "solution", "电学实验": "solution", "光学实验": "solution",
+    "力学综合": "solution", "电磁学综合": "solution", "力电综合": "solution",
+    "热学": "solution", "机械振动与波": "solution", "电磁波": "solution", "相对论": "solution",
+    "无机实验": "solution", "有机实验": "solution", "定量实验": "solution",
+    "物质结构与性质": "solution", "有机化学基础": "solution",
+    "生物技术实践": "solution", "现代生物科技专题": "solution",
+    "旅游地理": "solution", "环境保护": "solution", "自然灾害与防治": "solution",
+    "历史上重大改革回眸": "solution", "近代社会的民主思想与实践": "solution",
+    "20世纪的战争与和平": "solution", "中外历史人物评说": "solution",
+    "坐标系与参数方程": "solution", "不等式选讲": "solution",
 }
 
 
 def question_type_options(grade: str, subject: str) -> list[str]:
-    """按年级、学科返回出题界面允许使用的题型中文标签。"""
-    primary = str(grade or "").endswith(("一年级", "二年级", "三年级", "四年级", "五年级", "六年级"))
-    if primary and subject == "数学":
-        return ["选择题", "填空题", "判断题", "计算题", "应用题"]
-    if grade in ("七年级", "八年级", "九年级") and subject == "数学":
-        return ["选择题", "填空题", "解答题", "证明题"]
-    if grade in ("七年级", "八年级", "九年级") and subject == "语文":
-        return ["选择题", "填空题", "阅读理解", "作文题"]
-    if grade in ("七年级", "八年级", "九年级") and subject == "政治":
+    """按年级、学科返回出题界面允许使用的题型中文标签（全学科全学段）。"""
+    grade = str(grade or "")
+    is_primary = grade.endswith(("一年级", "二年级", "三年级", "四年级", "五年级", "六年级"))
+    is_junior = grade in ("七年级", "八年级", "九年级")
+    is_senior = grade in ("高一", "高二", "高三") or grade.endswith(("高一", "高二", "高三"))
+
+    # ========== 语文 ==========
+    if subject == "语文":
+        if is_primary:
+            return ["看拼音写词语", "形近字辨析", "多音字辨析", "选词填空", "词语搭配",
+                    "按课文内容填空", "句子排序", "句型转换", "修改病句", "标点符号",
+                    "阅读理解", "看图写话", "作文"]
+        if is_junior:
+            return ["字音字形", "词语运用", "病句辨析与修改", "语句衔接与排序", "标点符号",
+                    "文学常识与名著阅读", "古诗文默写", "文言文阅读", "古代诗歌鉴赏",
+                    "现代文阅读", "语言文字运用", "作文"]
+        if is_senior:
+            return ["选择题", "古诗文默写", "文言文阅读", "古代诗歌鉴赏",
+                    "现代文阅读（论述类）", "现代文阅读（实用类）", "现代文阅读（文学类）",
+                    "语言文字运用", "作文"]
+        return ["选择题", "填空题", "阅读理解", "作文"]
+
+    # ========== 数学 ==========
+    if subject == "数学":
+        if is_primary:
+            return ["选择题", "填空题", "判断题", "计算题", "操作题", "应用题", "图形与几何题"]
+        if is_junior:
+            return ["选择题", "填空题", "计算题", "解答题", "证明题", "应用题", "作图题"]
+        if is_senior:
+            return ["单项选择题", "多项选择题", "填空题", "解答题", "证明题",
+                    "选考题（坐标系与参数方程）", "选考题（不等式选讲）"]
+        return ["选择题", "填空题", "解答题"]
+
+    # ========== 英语 ==========
+    if subject == "英语":
+        if is_primary:
+            return ["听力选择", "听力填空", "字母辨音", "单词拼写", "单项选择",
+                    "选词填空", "句型转换", "补全对话", "阅读理解", "书面表达"]
+        if is_junior:
+            return ["听力选择", "听力填空", "单项选择", "完形填空", "阅读理解",
+                    "词汇运用", "语法填空", "句型转换", "补全对话", "短文填空", "书面表达"]
+        if is_senior:
+            return ["听力选择", "听力填空", "阅读理解", "七选五", "完形填空",
+                    "语法填空", "短文改错", "应用文写作", "读后续写", "概要写作"]
+        return ["选择题", "填空题", "阅读理解", "作文"]
+
+    # ========== 物理 ==========
+    if subject == "物理":
+        if is_junior:
+            return ["选择题", "填空题", "实验探究题", "计算题", "简答题", "作图题"]
+        if is_senior:
+            return ["单项选择题", "多项选择题", "实验题", "计算题",
+                    "选考题（热学）", "选考题（机械振动与波）", "选考题（光学）"]
+        return ["选择题", "填空题", "解答题"]
+
+    # ========== 化学 ==========
+    if subject == "化学":
+        if is_junior:
+            return ["选择题", "填空题", "实验题", "计算题", "推断题", "工艺流程题"]
+        if is_senior:
+            return ["单项选择题", "填空题", "实验题", "工艺流程题", "有机推断与合成题",
+                    "化学反应原理题", "选考题（物质结构与性质）", "选考题（有机化学基础）"]
+        return ["选择题", "填空题", "解答题"]
+
+    # ========== 生物 ==========
+    if subject == "生物":
+        if is_junior:
+            return ["选择题", "填空题", "识图作答题", "实验探究题", "简答题"]
+        if is_senior:
+            return ["单项选择题", "多项选择题", "填空题", "简答题", "实验设计题",
+                    "图表分析题", "选考题（生物技术实践）", "选考题（现代生物科技专题）"]
+        return ["选择题", "填空题", "解答题"]
+
+    # ========== 政治/道法 ==========
+    if subject == "政治":
+        if is_primary:
+            return ["选择题", "填空题", "判断题", "简答题", "材料分析题"]
+        if is_junior:
+            return ["选择题", "简答题", "材料分析题", "辨析题", "实践探究题"]
+        if is_senior:
+            return ["单项选择题", "材料分析题", "简答题", "辨析题", "论述题", "开放性试题"]
         return ["选择题", "材料分析题"]
+
+    # ========== 历史 ==========
+    if subject == "历史":
+        if is_junior:
+            return ["选择题", "材料分析题", "简答题", "论述题", "识图题"]
+        if is_senior:
+            return ["单项选择题", "材料分析题", "简答题", "论述题", "开放性试题",
+                    "选考题（历史上重大改革回眸）", "选考题（中外历史人物评说）"]
+        return ["选择题", "材料分析题"]
+
+    # ========== 地理 ==========
+    if subject == "地理":
+        if is_junior:
+            return ["选择题", "综合题", "读图分析题", "填空题", "简答题"]
+        if is_senior:
+            return ["单项选择题", "多项选择题", "综合题", "读图分析题", "简答题", "论述题",
+                    "选考题（旅游地理）", "选考题（环境保护）"]
+        return ["选择题", "综合题"]
+
+    # 默认
     return ["选择题", "填空题", "解答题"]
 
 

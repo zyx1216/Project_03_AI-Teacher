@@ -36,6 +36,7 @@ from utils import ocr_task_service as ocr_tasks
 from utils import vector_store
 from utils import lesson_service as lesson_svc
 from utils import question_service as qs
+from utils import user_config
 from utils import question_importer as qi
 from utils import ppt_generator
 from utils import template_service
@@ -642,10 +643,14 @@ def tab_lesson():
     st.subheader("AI 备课")
 
     row1, row2 = st.columns(2)
+    # 年级选择：新用户默认一年级，选择后自动保存，下次打开自动恢复
+    last_grade = user_config.get_last_grade_display()
+    grade_index = DISPLAY_GRADE_CHOICES[:-1].index(last_grade) if last_grade in DISPLAY_GRADE_CHOICES[:-1] else 0
     grade_display = row1.selectbox(
         "年级", DISPLAY_GRADE_CHOICES[:-1],
-        index=DISPLAY_GRADE_CHOICES.index("初二"),
-        key="lesson_grade_select")
+        index=grade_index,
+        key="lesson_grade_select",
+        on_change=lambda: user_config.set_last_grade_display(st.session_state["lesson_grade_select"]))
     grade = to_storage_grade(grade_display)
     current_subject = row2.selectbox(
         "学科", SUBJECT_NAMES,
@@ -968,10 +973,14 @@ def tab_question_gen():
                     st.rerun()
 
     row1, row2 = st.columns(2)
+    # 年级选择：新用户默认一年级，选择后自动保存，下次打开自动恢复
+    last_grade = user_config.get_last_grade_display()
+    grade_index = DISPLAY_GRADE_CHOICES[:-1].index(last_grade) if last_grade in DISPLAY_GRADE_CHOICES[:-1] else 0
     grade_display = row1.selectbox(
         "年级", DISPLAY_GRADE_CHOICES[:-1],
-        index=DISPLAY_GRADE_CHOICES.index("初二"),
-        key="question_gen_grade")
+        index=grade_index,
+        key="question_gen_grade",
+        on_change=lambda: user_config.set_last_grade_display(st.session_state["question_gen_grade"]))
     grade = to_storage_grade(grade_display)
     if "question_gen_current_subject" not in st.session_state:
         st.session_state["question_gen_current_subject"] = DEFAULT_SUBJECT
@@ -993,6 +1002,12 @@ def tab_question_gen():
     if QUESTION_TASK_ROWS_KEY not in st.session_state:
         _set_question_task_rows(qs.task_editor_dataframe(
             [], default_type=allowed_types[0], ensure_default=bool(draft is None)))
+    # 难度数字转文字（用于下拉框显示）
+    _diff_labels = {1: "基础", 2: "中等", 3: "拓展"}
+    if QUESTION_TASK_ROWS_KEY in st.session_state:
+        _df = st.session_state[QUESTION_TASK_ROWS_KEY]
+        if "难度" in _df.columns:
+            _df["难度"] = _df["难度"].apply(lambda x: _diff_labels.get(int(x or 2), "中等"))
 
     material_id = _question_gen_material(subject)
     knowledge_points = _knowledge_point_picker(subject, material_id)
@@ -1000,7 +1015,16 @@ def tab_question_gen():
     st.caption("当前学科可选题型：" + "、".join(allowed_types))
     edited_df = st.data_editor(
         st.session_state[QUESTION_TASK_ROWS_KEY], num_rows="dynamic",
-        key=QUESTION_TASK_EDITOR_KEY, width="stretch")
+        key=QUESTION_TASK_EDITOR_KEY, width="stretch",
+        column_config={
+            "题型": st.column_config.SelectColumn(
+                "题型", options=allowed_types, required=True),
+            "难度": st.column_config.SelectColumn(
+                "难度", options=["基础", "中等", "拓展"], required=True),
+            "数量": st.column_config.NumberColumn(
+                "数量", min_value=1, max_value=100, step=1, required=True),
+            "删除": st.column_config.CheckboxColumn("删除", default=False),
+        })
 
     btn1, btn2 = st.columns(2)
     extra = btn1.text_input("其他要求（可选）", key="question_gen_extra",
@@ -1009,11 +1033,26 @@ def tab_question_gen():
         rows = _current_editor_rows(
             st.session_state[QUESTION_TASK_ROWS_KEY], edited_df,
             QUESTION_TASK_EDITOR_KEY).to_dict("records")
-        kept = [row for row in rows if not bool(row.get("删除", False))]
+        # 难度文字转回数字
+        _diff_to_num = {"基础": 1, "中等": 2, "拓展": 3}
+        kept = []
+        for row in rows:
+            if bool(row.get("删除", False)):
+                continue
+            # 跳过全空白行（题型为空的行）
+            qtype = str(row.get("题型") or "").strip()
+            if not qtype:
+                continue
+            diff_val = row.get("难度")
+            if isinstance(diff_val, str):
+                diff_num = _diff_to_num.get(diff_val, 2)
+            else:
+                diff_num = int(diff_val or 2)
+            count_val = row.get("数量")
+            count_num = int(count_val or 1)
+            kept.append({"question_type": qtype, "difficulty": diff_num, "count": count_num})
         _set_question_task_rows(qs.task_editor_dataframe(
-            [{"question_type": row.get("题型"), "difficulty": row.get("难度"),
-              "count": row.get("数量")} for row in kept],
-            default_type=allowed_types[0], ensure_default=False))
+            kept, default_type=allowed_types[0], ensure_default=False))
         drafts[subject] = qs.draft_from_editor(
             kept, allowed_types, material_id, knowledge_points,
             extra, validate=False)
@@ -1037,6 +1076,12 @@ def tab_question_gen():
             rows = _current_editor_rows(
                 st.session_state[QUESTION_TASK_ROWS_KEY], edited_df,
                 QUESTION_TASK_EDITOR_KEY).to_dict("records")
+            # 难度文字转回数字
+            _diff_to_num = {"基础": 1, "中等": 2, "拓展": 3}
+            for _row in rows:
+                _dv = _row.get("难度")
+                if isinstance(_dv, str):
+                    _row["难度"] = _diff_to_num.get(_dv, 2)
             current_draft = qs.draft_from_editor(
                 rows, allowed_types, material_id, knowledge_points,
                 extra.strip(), validate=True)
