@@ -662,6 +662,31 @@ def tab_lesson():
                 topic.strip(), grade, chapter_text, hours, style,
                 material_id, chapters, current_subject, template_name)
 
+    # 检测未完成的草稿，提示用户继续编辑
+    if "lp_plan" not in st.session_state:
+        with SessionLocal() as session:
+            draft_plans = lesson_svc.list_plans(session, subject=current_subject)
+            draft_plans = [p for p in draft_plans if p.title.endswith("（草稿）")]
+        if draft_plans:
+            latest_draft = draft_plans[0]
+            with st.container(border=True):
+                st.warning(f"📝 您有未完成的教案草稿：**{latest_draft.title}**")
+                draft_c1, draft_c2 = st.columns([1, 4])
+                if draft_c1.button("继续编辑", type="primary", key="continue_draft_btn"):
+                    st.session_state['lp_plan'] = lesson_svc.load_plan(latest_draft)
+                    st.session_state['lp_meta'] = {
+                        'title': latest_draft.title,
+                        'grade': latest_draft.grade or '',
+                        'chapter': latest_draft.chapter or '',
+                        'source': latest_draft.textbook_source,
+                        'subject': lesson_svc.plan_subject(latest_draft),
+                        'plan_id': latest_draft.id,
+                    }
+                    st.rerun()
+                if draft_c2.button("忽略草稿", key="ignore_draft_btn"):
+                    st.session_state['lp_ignore_draft'] = latest_draft.id
+                    st.rerun()
+
     if "lp_plan" in st.session_state:
         _edit_lesson()
     else:
@@ -904,6 +929,22 @@ def _saved_lessons():
 def tab_question_gen():
     st.subheader("AI 出题")
 
+    # 检测未完成的题目预览，提示用户继续查看
+    if 'multi_gen_questions' not in st.session_state:
+        saved_grouped, saved_config = load_question_preview()
+        if saved_grouped and saved_config:
+            total = sum(len(item.get('valid', [])) for item in saved_grouped.values())
+            with st.container(border=True):
+                st.warning(f"📝 您有未完成的出题预览（共 {total} 道题）")
+                prev_c1, prev_c2 = st.columns([1, 4])
+                if prev_c1.button("继续查看", type="primary", key="continue_question_preview_btn"):
+                    st.session_state['multi_gen_questions'] = saved_grouped
+                    st.session_state['multi_gen_config'] = saved_config
+                    st.rerun()
+                if prev_c2.button("清空预览", key="clear_question_preview_btn"):
+                    clear_question_preview()
+                    st.rerun()
+
     row1, row2 = st.columns(2)
     grade_display = row1.selectbox(
         "年级", DISPLAY_GRADE_CHOICES[:-1],
@@ -1131,7 +1172,7 @@ def _generate_multi_subject_questions(grade, active_subjects, drafts):
             grouped[subject] = {'valid': valid, 'rejected': rejected}
 
     st.session_state['multi_gen_questions'] = grouped
-    st.session_state['multi_gen_config'] = {
+    config_data = {
         'grade': grade,
         'subjects': list(active_subjects),
         'drafts': {
@@ -1139,6 +1180,8 @@ def _generate_multi_subject_questions(grade, active_subjects, drafts):
             for subject in active_subjects
         },
     }
+    st.session_state['multi_gen_config'] = config_data
+    save_question_preview(grouped, config_data)  # 持久化到临时文件
     st.rerun()
 
 
@@ -1179,10 +1222,16 @@ def _preview_multi_subject_questions():
         st.success(f"已入库 {total} 道题，可在题库管理中审核。")
         st.session_state.pop('multi_gen_questions', None)
         st.session_state.pop('multi_gen_config', None)
+        clear_question_preview()  # 清除临时文件
+
+        clear_question_preview()  # 清除临时文件
         st.rerun()
     if c2.button("清空本次结果", key="clear_multi_questions"):
         st.session_state.pop('multi_gen_questions', None)
         st.session_state.pop('multi_gen_config', None)
+        clear_question_preview()  # 清除临时文件
+
+        clear_question_preview()  # 清除临时文件
         st.rerun()
 
     with st.expander("出题历史"):
@@ -1465,6 +1514,9 @@ def _import_questions():
                 st.session_state["import_records"] = qi.records_from_text(pasted)
                 st.rerun()
 
+        # 持久化导入预览
+        if "import_records" in st.session_state:
+            _save_state("import_records.json", st.session_state["import_records"])
         records = st.session_state.get("import_records")
         if records:
             problem_count = sum(1 for r in records if r.get("problems"))
@@ -1622,6 +1674,14 @@ def _past_exam_panel():
         except Exception as exc:
             st.error(f"真题解析失败：{exc}")
 
+    # 持久化历年真题预览
+    if "past_exam_records" in st.session_state:
+        _save_state("past_exam_records.json", st.session_state["past_exam_records"])
+    # 从临时文件恢复
+    if "past_exam_records" not in st.session_state:
+        saved = _load_state("past_exam_records.json")
+        if saved:
+            st.session_state["past_exam_records"] = saved
     records = st.session_state.get("past_exam_records")
     if records:
         problem_count = sum(1 for item in records if item.get("problems"))
@@ -1699,6 +1759,11 @@ def _question_ocr_tasks(subject):
 
 def tab_ppt():
     st.subheader("PPT 生成")
+    # 从临时文件恢复PPT预览
+    if "ppt_preview" not in st.session_state:
+        saved = _load_state("ppt_preview.json")
+        if saved:
+            st.session_state["ppt_preview"] = saved
     st.caption("基于已保存教案生成，可选简约、教育、商务主题或自定义 PPTX 模板。")
     current_subject = _subject_selectbox(fs.PPT_SUBJECT)
 
@@ -1734,6 +1799,9 @@ def tab_ppt():
                 with st.expander("错误详情"):
                     st.code(str(exc))
 
+    # 持久化PPT预览
+    if "ppt_preview" in st.session_state:
+        _save_state("ppt_preview.json", st.session_state["ppt_preview"])
     preview = st.session_state.get("ppt_preview")
     if preview:
         info = ppt_generator.preview_ppt(preview["data"])
@@ -1749,6 +1817,7 @@ def tab_ppt():
             key="download_generated_ppt")
         if pc2.button("取消预览", key="cancel_ppt_preview"):
             st.session_state.pop("ppt_preview", None)
+            _clear_state("ppt_preview.json")  # 清除临时文件
             st.rerun()
 
 
@@ -1820,6 +1889,70 @@ def _custom_ppt_template_panel():
     if selected is not None:
         return str(template_service._ppt_template_path(selected))
     return None
+
+
+
+# ---------- 题目预览持久化 ----------
+QUESTION_PREVIEW_FILE = Path(config.DATA_DIR) / "question_preview.json"
+
+def save_question_preview(grouped, config_data):
+    """将生成的题目预览保存到临时文件。"""
+    try:
+        with open(QUESTION_PREVIEW_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'grouped': grouped, 'config': config_data}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+def load_question_preview():
+    """从临时文件加载题目预览。"""
+    try:
+        if QUESTION_PREVIEW_FILE.exists():
+            with open(QUESTION_PREVIEW_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data.get('grouped'), data.get('config')
+    except Exception:
+        pass
+    return None, None
+
+def clear_question_preview():
+    """清空题目预览临时文件。"""
+    try:
+        if QUESTION_PREVIEW_FILE.exists():
+            QUESTION_PREVIEW_FILE.unlink()
+    except Exception:
+        pass
+
+
+
+# ---------- 通用中间状态持久化 ----------
+def _save_state(filename, data):
+    """保存中间状态到临时文件。"""
+    try:
+        path = Path(config.DATA_DIR) / filename
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        pass
+
+def _load_state(filename):
+    """从临时文件加载中间状态。"""
+    try:
+        path = Path(config.DATA_DIR) / filename
+        if path.exists():
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+def _clear_state(filename):
+    """清除临时状态文件。"""
+    try:
+        path = Path(config.DATA_DIR) / filename
+        if path.exists():
+            path.unlink()
+    except Exception:
+        pass
 
 
 def show() -> None:

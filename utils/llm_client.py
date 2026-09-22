@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 LLM 调用封装（OpenAI 兼容接口）。
 
@@ -26,9 +26,9 @@ KEYRING_USERNAME = "llm_api_key"
 
 CONFIG_PATH = Path(config.DATA_DIR) / "llm_config.json"
 
-TIMEOUT_SECONDS = 30
-MAX_RETRIES = 2          # 首次失败后的额外尝试次数
-RETRY_BACKOFF = [1, 2]   # 每次重试前等待秒数
+TIMEOUT_SECONDS = 120
+MAX_RETRIES = 1          # 首次失败后的额外尝试次数
+RETRY_BACKOFF = [2]      # 每次重试前等待秒数
 
 # 默认配置；内容/向量模型默认留空，由界面填写或回退
 DEFAULT_CONFIG = {
@@ -254,7 +254,7 @@ def _friendly_error(exc) -> str:
     if "404" in text or ("model" in text and "not" in text):
         return "找不到这个模型，请核对模型名称（如 deepseek-chat）。"
     if "timeout" in text or "timed out" in text:
-        return "请求超时了（超过 30 秒），可能是网络慢，请稍后再试。"
+        return "请求超时了（超过 120 秒），可能是网络慢，请稍后再试。"
     if "connection" in text or "resolve host" in text or "10013" in text:
         return "连不上服务器，请检查网络或 Base URL 是否填对。"
     return f"调用失败（已重试 2 次）：{str(exc)[:120]}"
