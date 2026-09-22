@@ -1512,12 +1512,15 @@ def _question_filters():
 
         returned = response.get("data") if hasattr(response, "get") else None
         returned_rows = returned.to_dict("records") if hasattr(returned, "to_dict") else []
+        # 正确获取勾选的行（AgGrid返回的selected_rows）
+        selected_rows_data = response.get("selected_rows", []) if hasattr(response, "get") else []
+        selected_ids = [int(row.get("question_id")) for row in selected_rows_data
+                        if row.get("question_id") is not None]
 
-        # 批量操作按钮（表格下方，returned_rows已可用）
+        # 批量操作按钮（表格下方）
         pending_count = len([q for q in questions if q.status == "pending"])
-        op1, op2, op3 = st.columns([1, 1, 3])
+        op1, op2, op3, op4 = st.columns([1, 1, 1, 2])
         if op1.button("✅ 审核所选", type="primary", key="bank_batch_approve_bottom"):
-            selected_ids = qs.selected_question_ids(returned_rows)
             if selected_ids:
                 n = qs.approve_questions(session, selected_ids)
                 session.commit()
@@ -1526,14 +1529,41 @@ def _question_filters():
             else:
                 st.warning("请先在表格中勾选题目。")
         if op2.button("👁️ 查看所选", key="bank_batch_view_bottom"):
-            selected_ids = qs.selected_question_ids(returned_rows)
             if selected_ids:
                 st.session_state["bank_batch_view_ids"] = selected_ids
                 st.rerun()
             else:
                 st.warning("请先在表格中勾选题目。")
+        if op3.button("🗑️ 删除所选", key="bank_batch_delete_bottom"):
+            if selected_ids:
+                st.session_state["bank_batch_delete_ids"] = selected_ids
+                st.rerun()
+            else:
+                st.warning("请先在表格中勾选题目。")
         if pending_count > 0:
-            op3.caption(f"当前有 {pending_count} 道待审核题目，在表格中勾选后点'审核所选'")
+            op4.caption(f"当前有 {pending_count} 道待审核，勾选后点对应按钮")
+
+        # 批量删除二次确认
+        batch_delete_ids = st.session_state.get("bank_batch_delete_ids", [])
+        if batch_delete_ids:
+            with st.container(border=True):
+                st.warning(f"⚠️ 确认删除以下 {len(batch_delete_ids)} 道题？此操作不可恢复！")
+                del_qs = [q for q in questions if q.id in batch_delete_ids]
+                for q in del_qs[:5]:
+                    st.caption(f"#{q.id} {q.content[:40]}")
+                if len(del_qs) > 5:
+                    st.caption(f"...等共 {len(del_qs)} 道题")
+                dc1, dc2 = st.columns(2)
+                if dc1.button("确认删除", type="primary", key="confirm_batch_delete"):
+                    for qid in batch_delete_ids:
+                        qs.delete_question(session, qid)
+                    session.commit()
+                    st.session_state.pop("bank_batch_delete_ids", None)
+                    st.success(f"已删除 {len(batch_delete_ids)} 道题。")
+                    st.rerun()
+                if dc2.button("取消", key="cancel_batch_delete"):
+                    st.session_state.pop("bank_batch_delete_ids", None)
+                    st.rerun()
 
         clicked = qs.clicked_question_id(returned_rows)
         picked_id = clicked or st.session_state.get("bank_picked_id")
