@@ -117,18 +117,109 @@ def _load_chunks(textbook: Textbook):
     return material.chunk_chapters(material.split_chapters(text))
 
 
-def _render_math(text: str):
-    """把含 $...$ 的文本分段渲染：公式走 st.latex，普通文字走 st.write。"""
+def _format_question_content(text: str, question_type: str = "solution") -> str:
+    """根据题型格式化题目内容，返回markdown文本。"""
     if not text:
-        st.write("—")
+        return "—"
+
+    lines = text.split("\n")
+    formatted_lines = []
+
+    # 选择题：识别选项A/B/C/D，格式化对齐
+    if question_type == "choice":
+        for line in lines:
+            line = line.strip()
+            if not line:
+                formatted_lines.append("")
+                continue
+            # 识别选项格式：A. xxx / A、xxx / A) xxx / A xxx
+            option_match = re.match(r"^([A-ZＡ-Ｚ])[\.、\)\]\s：:]+(.+)$", line)
+            if option_match:
+                letter = option_match.group(1)
+                option_text = option_match.group(2).strip()
+                formatted_lines.append(f"- **{letter}.** {option_text}")
+            else:
+                formatted_lines.append(line)
+    else:
+        # 其他题型：保留原始格式，处理常见的编号
+        for line in lines:
+            line = line.strip()
+            if not line:
+                formatted_lines.append("")
+                continue
+            # 识别小问题编号：(1) / 1. / ① 等
+            sub_match = re.match(r"^([\(（]?[0-9①②③④⑤⑥⑦⑧⑨⑩]+[\)）\.、\s])(.+)$", line)
+            if sub_match:
+                num = sub_match.group(1).strip()
+                sub_text = sub_match.group(2).strip()
+                formatted_lines.append(f"**{num}** {sub_text}")
+            else:
+                formatted_lines.append(line)
+
+    return "  \n".join(formatted_lines)
+
+
+def _format_answer(answer: str, question_type: str = "solution") -> str:
+    """根据题型格式化答案。"""
+    if not answer:
+        return "—"
+
+    # 选择题：答案可能是"A"或"A. xxx"，统一格式
+    if question_type == "choice":
+        answer = answer.strip()
+        # 如果只是字母，加粗显示
+        if re.match(r"^[A-ZＡ-Ｚ]$", answer):
+            return f"**{answer}**"
+        return answer
+
+    # 填空题：多个答案可能用分号/逗号/换行分隔，分点显示
+    if question_type == "fill":
+        # 按常见分隔符拆分
+        parts = re.split(r"[；;\n]+", answer)
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) > 1:
+            return "；".join(f"（{i+1}）{p}" for i, p in enumerate(parts))
+        return answer
+
+    return answer
+
+
+def _render_question(question: dict, index: int):
+    """完整渲染一道题：标题、题干、答案、解析、知识点。"""
+    qtype = question.get("question_type", "solution")
+    type_label = TYPE_LABELS.get(qtype, "解答题")
+    diff_label = DIFF_LABELS.get(question.get("difficulty", 2), "中等")
+
+    with st.container(border=True):
+        # 题目标题
+        st.markdown(f"**第 {index} 题**　|　{type_label}　|　难度：{diff_label}")
+        st.divider()
+
+        # 题目内容
+        content_text = _format_question_content(question.get("content", ""), qtype)
+        st.markdown(content_text)
+
+        # 答案和解析
+        st.divider()
+        answer_text = _format_answer(question.get("answer", ""), qtype)
+        st.markdown(f"**答案：** {answer_text}")
+
+        if question.get("analysis"):
+            st.markdown(f"**解析：** {question['analysis']}")
+
+        if question.get("knowledge_points"):
+            kps = question["knowledge_points"]
+            if isinstance(kps, list):
+                kps = "、".join(str(k) for k in kps)
+            st.caption(f"考察知识点：{kps}")
+
+
+def _render_math(text: str):
+    """兼容旧调用：简单渲染文本。"""
+    if not text:
+        st.markdown("—")
         return
-    for part in re.split(r"(\$[^$]+\$)", text):
-        if not part:
-            continue
-        if part.startswith("$") and part.endswith("$") and len(part) > 2:
-            st.latex(part.strip("$"))
-        else:
-            st.write(part)
+    st.markdown(text.replace("\n", "  \n"))
 
 # ===========================================================================
 # Tab 1：资料管理
@@ -1252,11 +1343,7 @@ def _preview_multi_subject_questions():
             st.error(f"{subject}有 {result['rejected']} 道缺答案题被拒收。")
         with st.expander(f"{subject}（{len(result['valid'])}题）", expanded=True):
             for i, question in enumerate(result['valid'], start=1):
-                st.markdown(
-                    f"**{i}. {TYPE_LABELS.get(question['question_type'], '解答题')}"
-                    f"·{DIFF_LABELS[question['difficulty']]}**")
-                _render_math(question['content'])
-                st.caption(f"答案：{question['answer']}")
+                _render_question(question, i)
 
     c1, c2 = st.columns(2)
     if c1.button("✅ 确认入库", type="primary", key="save_multi_questions"):
