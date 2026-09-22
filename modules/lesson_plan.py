@@ -185,14 +185,20 @@ def _format_answer(answer: str, question_type: str = "solution") -> str:
 
 
 def _safe_markdown(text: str):
-    """安全渲染markdown：转义HTML特殊字符，把$...$公式换成纯文本（避免LaTeX渲染导致React错误）。"""
+    """安全渲染markdown：转义所有可能导致React错误的字符。
+    处理：$...$公式、HTML特殊字符、反引号、连续换行等。
+    """
     if not text:
         return ""
     import re as _re
-    # 把$...$公式换成纯文本（去掉$符号）
+    # 1. 把$...$公式换成纯文本（去掉$符号，避免LaTeX渲染错误）
     text = _re.sub(r"\$([^$]+)\$", r"\1", text)
-    # 转义HTML特殊字符
+    # 2. 转义HTML特殊字符
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 3. 把反引号转义（避免破坏代码格式）
+    text = text.replace("`", "\`")
+    # 4. 把连续多个换行符换成两个（避免过多空行）
+    text = _re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 
@@ -217,8 +223,9 @@ def _render_question(question: dict, index: int, use_container: bool = True):
         # 答案和解析
         st.markdown("---")
         answer_text = _format_answer(question.get("answer", ""), qtype)
-        # 答案用代码格式显示，避免 > < 等特殊字符被markdown解析
-        st.markdown(f"**答案：** `{answer_text}`")
+        # 答案也经过安全处理，避免特殊字符导致React错误
+        safe_answer = _safe_markdown(answer_text)
+        st.markdown(f"**答案：** {safe_answer}")
 
         if question.get("analysis"):
             safe_analysis = _safe_markdown(question['analysis'])
@@ -228,7 +235,8 @@ def _render_question(question: dict, index: int, use_container: bool = True):
             kps = question["knowledge_points"]
             if isinstance(kps, list):
                 kps = "、".join(str(k) for k in kps)
-            st.caption(f"考察知识点：{kps}")
+            safe_kps = _safe_markdown(kps)
+            st.caption(f"考察知识点：{safe_kps}")
 
     if use_container:
         with st.container(border=True):

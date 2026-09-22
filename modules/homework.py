@@ -64,17 +64,22 @@ def _subject_selectbox(key: str, caption: str | None = None) -> str:
 
 
 def _render_math(text: str):
-    """含 $...$ 的文本分段渲染：公式 st.latex，普通文本 st.write。"""
+    """安全渲染文本：转义所有可能导致React错误的字符。
+    处理：$...$公式、HTML特殊字符、反引号、连续换行等。
+    """
     if not text:
-        st.write("—")
+        st.markdown("—")
         return
-    for part in re.split(r"(\$[^$]+\$)", text):
-        if not part:
-            continue
-        if part.startswith("$") and part.endswith("$") and len(part) > 2:
-            st.latex(part.strip("$"))
-        else:
-            st.write(part)
+    import re as _re
+    # 1. 把$...$公式换成纯文本（去掉$符号，避免LaTeX渲染错误）
+    text = _re.sub(r"\$([^$]+)\$", r"\1", text)
+    # 2. 转义HTML特殊字符
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 3. 把反引号转义（避免破坏代码格式）
+    text = text.replace("`", "\`")
+    # 4. 把连续多个换行符换成markdown换行
+    text = _re.sub(r"\n{2,}", "  \n", text)
+    st.markdown(text)
 
 
 def _read_prompt(filename: str) -> str:
