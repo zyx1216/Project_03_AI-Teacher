@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 备课页面（v0.3）。
 
@@ -282,9 +282,11 @@ def _material_info_dialog():
             return
         st.session_state["mt_pending"] = data
         st.session_state.pop("mt_raw_pending", None)
+        st.rerun()
 
     def cancel():
         st.session_state.pop("mt_raw_pending", None)
+        st.rerun()
 
     c1, c2 = st.columns(2)
     c1.button("取消", on_click=cancel)
@@ -410,11 +412,13 @@ def _ocr_material_dialog(task_id):
                 task.get("subject"), TEXT_DIR, SessionLocal)
             st.session_state["ocr_save_message"] = f"资料已保存（id={textbook_id}）。"
             st.session_state.pop("ocr_naming_task", None)
+            st.rerun()
         except Exception as exc:
             st.session_state["ocr_save_error"] = str(exc)
 
     def cancel():
         st.session_state.pop("ocr_naming_task", None)
+        st.rerun()
 
     c1, c2 = st.columns(2)
     c1.button("取消", on_click=cancel)
