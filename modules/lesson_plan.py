@@ -1002,27 +1002,30 @@ def tab_question_gen():
     if QUESTION_TASK_ROWS_KEY not in st.session_state:
         _set_question_task_rows(qs.task_editor_dataframe(
             [], default_type=allowed_types[0], ensure_default=bool(draft is None)))
-    # 难度数字转文字（用于下拉框显示）
-    _diff_labels = {1: "基础", 2: "中等", 3: "拓展"}
-    if QUESTION_TASK_ROWS_KEY in st.session_state:
-        _df = st.session_state[QUESTION_TASK_ROWS_KEY]
-        if "难度" in _df.columns:
-            _df["难度"] = _df["难度"].apply(lambda x: _diff_labels.get(int(x or 2), "中等"))
 
     material_id = _question_gen_material(subject)
     knowledge_points = _knowledge_point_picker(subject, material_id)
 
     st.caption("当前学科可选题型：" + "、".join(allowed_types))
+    st.caption("难度：1=基础，2=中等，3=拓展")
+
+    # 快速添加行：选择题型后点"添加一行"
+    add_c1, add_c2, add_c3 = st.columns([2, 1, 1])
+    quick_type = add_c1.selectbox("快速选择题型", allowed_types, key="quick_question_type")
+    quick_diff = add_c2.number_input("难度", min_value=1, max_value=3, value=2, step=1, key="quick_question_diff")
+    if add_c3.button("➕ 添加一行", key="add_question_row"):
+        current_rows = st.session_state[QUESTION_TASK_ROWS_KEY].to_dict("records")
+        current_rows.append({"题型": quick_type, "难度": int(quick_diff), "数量": 1, "删除": False})
+        _set_question_task_rows(pd.DataFrame(current_rows, columns=["题型", "难度", "数量", "删除"]))
+        st.rerun()
+
     edited_df = st.data_editor(
-        st.session_state[QUESTION_TASK_ROWS_KEY], num_rows="dynamic",
+        st.session_state[QUESTION_TASK_ROWS_KEY],
         key=QUESTION_TASK_EDITOR_KEY, width="stretch",
         column_config={
-            "题型": st.column_config.SelectboxColumn(
-                "题型", options=allowed_types, required=True),
-            "难度": st.column_config.SelectboxColumn(
-                "难度", options=["基础", "中等", "拓展"], required=True),
-            "数量": st.column_config.NumberColumn(
-                "数量", min_value=1, max_value=100, step=1, required=True),
+            "题型": st.column_config.TextColumn("题型", required=True),
+            "难度": st.column_config.NumberColumn("难度", min_value=1, max_value=3, step=1, required=True),
+            "数量": st.column_config.NumberColumn("数量", min_value=1, max_value=100, step=1, required=True),
             "删除": st.column_config.CheckboxColumn("删除", default=False),
         })
 
@@ -1033,8 +1036,6 @@ def tab_question_gen():
         rows = _current_editor_rows(
             st.session_state[QUESTION_TASK_ROWS_KEY], edited_df,
             QUESTION_TASK_EDITOR_KEY).to_dict("records")
-        # 难度文字转回数字
-        _diff_to_num = {"基础": 1, "中等": 2, "拓展": 3}
         kept = []
         for row in rows:
             if bool(row.get("删除", False)):
@@ -1043,13 +1044,8 @@ def tab_question_gen():
             qtype = str(row.get("题型") or "").strip()
             if not qtype:
                 continue
-            diff_val = row.get("难度")
-            if isinstance(diff_val, str):
-                diff_num = _diff_to_num.get(diff_val, 2)
-            else:
-                diff_num = int(diff_val or 2)
-            count_val = row.get("数量")
-            count_num = int(count_val or 1)
+            diff_num = int(row.get("难度") or 2)
+            count_num = int(row.get("数量") or 1)
             kept.append({"question_type": qtype, "difficulty": diff_num, "count": count_num})
         _set_question_task_rows(qs.task_editor_dataframe(
             kept, default_type=allowed_types[0], ensure_default=False))
@@ -1076,12 +1072,6 @@ def tab_question_gen():
             rows = _current_editor_rows(
                 st.session_state[QUESTION_TASK_ROWS_KEY], edited_df,
                 QUESTION_TASK_EDITOR_KEY).to_dict("records")
-            # 难度文字转回数字
-            _diff_to_num = {"基础": 1, "中等": 2, "拓展": 3}
-            for _row in rows:
-                _dv = _row.get("难度")
-                if isinstance(_dv, str):
-                    _row["难度"] = _diff_to_num.get(_dv, 2)
             current_draft = qs.draft_from_editor(
                 rows, allowed_types, material_id, knowledge_points,
                 extra.strip(), validate=True)
