@@ -169,7 +169,7 @@ def _format_answer(answer: str, question_type: str = "solution") -> str:
         answer = answer.strip()
         # 如果只是字母，加粗显示
         if re.match(r"^[A-ZＡ-Ｚ]$", answer):
-            return f"**{answer}**"
+            return answer
         return answer
 
     # 填空题：多个答案可能用分号/逗号/换行分隔，分点显示
@@ -185,21 +185,14 @@ def _format_answer(answer: str, question_type: str = "solution") -> str:
 
 
 def _safe_markdown(text: str):
-    """安全渲染markdown：转义HTML特殊字符，保留$...$公式。"""
+    """安全渲染markdown：转义HTML特殊字符，把$...$公式换成纯文本（避免LaTeX渲染导致React错误）。"""
     if not text:
         return ""
-    # 临时替换$...$公式为占位符
     import re as _re
-    placeholders = []
-    def _replace_math(match):
-        placeholders.append(match.group(0))
-        return f"__MATH_{len(placeholders)-1}__"
-    text = _re.sub(r"\$[^$]+\$", _replace_math, text)
+    # 把$...$公式换成纯文本（去掉$符号）
+    text = _re.sub(r"\$([^$]+)\$", r"\1", text)
     # 转义HTML特殊字符
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    # 恢复公式
-    for i, ph in enumerate(placeholders):
-        text = text.replace(f"__MATH_{i}__", ph)
     return text
 
 
@@ -1613,7 +1606,7 @@ def _question_filters():
             with st.container(border=True):
                 st.markdown(f"**📖 批量查看（共 {len(batch_view_ids)} 题）**")
                 view_qs = [q for q in questions if q.id in batch_view_ids]
-                for idx, q in enumerate(view_qs, start=1):
+                for q in view_qs:
                     _render_question({
                         "question_type": q.question_type,
                         "difficulty": q.difficulty,
@@ -1621,7 +1614,7 @@ def _question_filters():
                         "answer": q.answer,
                         "analysis": q.analysis,
                         "knowledge_points": qs.knowledge_points_list(q),
-                    }, idx, use_container=False)
+                    }, q.id, use_container=False)
                 if st.button("关闭批量查看", key="close_batch_view"):
                     st.session_state.pop("bank_batch_view_ids", None)
                     st.rerun()
