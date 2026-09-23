@@ -465,10 +465,9 @@ def _material_detail():
 
         st.markdown("**内容**")
         if picked_chapter:
-            chapters = material.split_chapters(full_text)
-            current = next((c for c in chapters if c["title"] == picked_chapter), None)
+            content_map = _chapter_content_map(material_id) if material_id else {}
             st.caption(f"当前章节：{picked_chapter}")
-            shown = current["content"] if current else "—"
+            shown = content_map.get(picked_chapter) or "—"
         else:
             shown = full_text or "—"
         st.text_area("全文", value=shown, height=400, disabled=True,
@@ -999,6 +998,37 @@ def _load_material_chapter_titles(material_id):
     return []
 
 
+def _chapter_content_map(material_id):
+    """根据数据库章节标题，从全文中切分各章节内容，返回 {标题: 内容}。
+    核心：用数据库确认过的章节标题作为锚点定位，避免 split_chapters
+    把"练一练"等小标题误当章节。"""
+    titles = _load_material_chapter_titles(material_id)
+    path = _text_file_path(material_id)
+    if not titles or not path.exists():
+        return {}
+    full_text = path.read_text(encoding="utf-8")
+
+    # 找到每个标题在正文中的起始位置。
+    # 标题可能在目录和正文都出现，目录通常位于全文前 25%，
+    # 因此正文锚点优先取 25% 之后的第一次出现；找不到再退回第一次出现。
+    skip_pos = int(len(full_text) * 0.25)
+    anchors = []  # [(位置, 标题)]
+    for title in titles:
+        body_pos = full_text.find(title, skip_pos)
+        if body_pos == -1:
+            body_pos = full_text.find(title)
+        if body_pos != -1:
+            anchors.append((body_pos, title))
+    anchors.sort(key=lambda x: x[0])
+
+    # 按锚点位置顺序切分，章节内容到下一个锚点为止
+    result = {}
+    for i, (pos, title) in enumerate(anchors):
+        end = anchors[i + 1][0] if i + 1 < len(anchors) else len(full_text)
+        result[title] = full_text[pos:end].strip()
+    return result
+
+
 def _lesson_material_picker(subject):
     """选择资料和章节；章节多选使用组件自带搜索。"""
     with SessionLocal() as session:
@@ -1059,11 +1089,12 @@ def _generate_lesson(topic, grade, chapter, hours, style, textbook_id,
         with SessionLocal() as session:
             textbook = session.get(Textbook, textbook_id)
             source = textbook.name if textbook else None
-            path = _text_file_path(textbook_id)
-            chapters = material.split_chapters(path.read_text(encoding='utf-8'))
-            picked = [c for c in chapters if c['title'] in selected_chapters]
+            content_map = _chapter_content_map(textbook_id)
+            picked_titles = [t for t in selected_chapters if t in content_map]
             context_text = '\n\n'.join(
-                f"【{c['title']}】\n{c['content']}" for c in picked)
+                f"【{t}】\n{content_map[t]}" for t in picked_titles)
+            if not context_text:
+                context_text = "（未匹配到章节内容）"
 
     template_text = template_service.lesson_template_content(template_name)
     system_prompt = _read_prompt("lesson_plan_prompt.txt")

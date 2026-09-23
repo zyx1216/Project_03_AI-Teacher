@@ -114,4 +114,11 @@ def detect_grade_from_title(title: str) -> str:
         if keyword in text:
             return grade
 
+    # 总复习特殊判定：高中总复习默认高三，初中总复习默认初三
+    if "总复习" in text or "中考复习" in text:
+        if "高中" in text or "高考" in text:
+            return "高三"
+        if "初中" in text or "中考" in text:
+            return "初三"
+
     return ""
