@@ -964,6 +964,11 @@ def tab_lesson():
     _saved_lessons()
 
 
+def _on_lesson_material_change():
+    """切换资料时清空已选章节。"""
+    st.session_state["lesson_chapter_select"] = []
+
+
 def _lesson_material_picker(subject):
     """选择资料和章节；章节多选使用组件自带搜索。"""
     with SessionLocal() as session:
@@ -974,7 +979,8 @@ def _lesson_material_picker(subject):
         labels = ["不使用资料"] + [book.name for book in books]
         material_id = st.selectbox(
             "选择资料", options, format_func=lambda x: labels[options.index(x)],
-            key="lesson_material_select")
+            key="lesson_material_select",
+            on_change=_on_lesson_material_change)
 
     titles = []
     if material_id is not None:
@@ -987,10 +993,8 @@ def _lesson_material_picker(subject):
                 for c in material.split_chapters(path.read_text(encoding="utf-8"))]
 
     with st.container(border=True):
-        previous = st.session_state.get("lesson_chapter_select", [])
-        default = [title for title in previous if title in titles]
         selected = st.multiselect(
-            "选择章节（可搜索）", titles, default=default,
+            "选择章节（可搜索）", titles,
             key="lesson_chapter_select",
             help="输入关键词可搜索，例如输入“一”可匹配“第一单元”。",
             disabled=material_id is None)
@@ -1443,6 +1447,11 @@ def _question_task_bar_dataframe(tasks: list[dict]) -> pd.DataFrame:
         "知识点", "补充要求", "task_id"])
 
 
+def _on_question_material_change():
+    """切换资料时清空已选知识点。"""
+    st.session_state["question_gen_kps"] = []
+
+
 def _question_gen_material(subject):
     """单条新任务的可选资料；不选资料也能生成。"""
     with SessionLocal() as session:
@@ -1455,7 +1464,8 @@ def _question_gen_material(subject):
     index = options.index(current) if current in options else 0
     return st.selectbox("资料（可选）", options, index=index,
                         format_func=lambda x: labels[options.index(x)],
-                        key="question_gen_material")
+                        key="question_gen_material",
+                        on_change=_on_question_material_change)
 
 
 def _knowledge_point_picker(subject, material_id):
