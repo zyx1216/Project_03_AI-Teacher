@@ -852,6 +852,18 @@ def normalize_question_task(data: dict, trust_existing: bool = False) -> dict:
     if count <= 0:
         raise ValueError(f"出题数量必须大于 0，当前为 {count}。")
 
+    # 章节（来自资料）
+    raw_chapters = data.get("chapters", [])
+    if isinstance(raw_chapters, str):
+        chapters = re.split(r"[，,、;；]\s*", raw_chapters)
+    elif isinstance(raw_chapters, list):
+        chapters = raw_chapters
+    else:
+        chapters = []
+    chapters = list(dict.fromkeys(
+        str(item).strip() for item in chapters if str(item).strip()))
+
+    # 知识点（来自题库）
     raw_kps = data.get("knowledge_points", [])
     if isinstance(raw_kps, str):
         try:
@@ -865,8 +877,8 @@ def normalize_question_task(data: dict, trust_existing: bool = False) -> dict:
         knowledge_points = []
     knowledge_points = list(dict.fromkeys(
         str(item).strip() for item in knowledge_points if str(item).strip()))
-    if not knowledge_points:
-        raise ValueError("知识点不能为空，请先选择或填写知识点。")
+
+    # 章节和知识点都是可选的，AI可根据学科年级直接出题
 
     material_id = data.get("material_id")
     try:
@@ -887,6 +899,7 @@ def normalize_question_task(data: dict, trust_existing: bool = False) -> dict:
         "difficulty": difficulty,
         "count": count,
         "material_id": material_id,
+        "chapters": chapters,
         "knowledge_points": knowledge_points,
         "extra": str(data.get("extra") or "").strip(),
         "selected": bool(data.get("selected", True)),
@@ -949,10 +962,13 @@ def tasks_from_drafts(drafts: dict, grade_display: str) -> list[dict]:
 def question_task_request_text(task: dict) -> str:
     """生成单条任务的请求文案，确保混合任务互不串年级和学科。"""
     task = normalize_question_task(task, trust_existing=True)
+    chapters_text = '、'.join(task.get('chapters', [])) or '无'
+    kps_text = '、'.join(task['knowledge_points']) or '无'
     return (
         f"学科：{task['subject']}\n"
         f"年级：{task['grade']}\n"
-        f"知识点：{'、'.join(task['knowledge_points'])}\n"
+        f"参考章节：{chapters_text}\n"
+        f"知识点：{kps_text}\n"
         f"命题任务：{task['question_type']}，"
         f"{DIFFICULTY_LABELS[task['difficulty']]}，"
         f"恰好 {task['count']} 道\n"

@@ -1275,8 +1275,9 @@ def tab_question_gen():
             st.session_state["question_gen_grade"]))
     grade = to_storage_grade(grade_display)
     def _on_question_subject_change():
-        """切换学科时重置资料和知识点选择。"""
+        """切换学科时重置资料、章节和知识点选择。"""
         st.session_state["question_gen_material"] = None
+        st.session_state["question_gen_chapters"] = []
         st.session_state["question_gen_kps"] = []
 
     subject = row2.radio(
@@ -1304,7 +1305,7 @@ def tab_question_gen():
             columns=["题型", "难度", "数量", "删除"])
 
     material_id = _question_gen_material(subject)
-    knowledge_points = _knowledge_point_picker(subject, material_id)
+    selected_chapters, knowledge_points = _knowledge_point_picker(subject, material_id)
     st.caption("当前年级和学科可选题型：" + "、".join(allowed_types))
     st.caption("难度：1=基础，2=中等，3=拓展")
 
@@ -1360,22 +1361,20 @@ def tab_question_gen():
             rows = [row for row in rows
                     if not pd.isna(row.get("题型")) and str(row.get("题型")).strip()]
             validated_rows = qs.validate_generation_tasks(rows, allowed_types)
-            if not knowledge_points:
-                st.warning("请先选择或填写知识点。")
-            else:
-                new_tasks = []
-                for item in validated_rows:
-                    new_tasks.append({
-                        "subject": subject,
-                        "grade": grade_display,
-                        "question_type": item["question_type"],
-                        "storage_type": item["storage_type"],
-                        "difficulty": item["difficulty"],
-                        "count": item["count"],
-                        "material_id": material_id,
-                        "knowledge_points": knowledge_points,
-                        "extra": extra.strip(),
-                    })
+            new_tasks = []
+            for item in validated_rows:
+                new_tasks.append({
+                    "subject": subject,
+                    "grade": grade_display,
+                    "question_type": item["question_type"],
+                    "storage_type": item["storage_type"],
+                    "difficulty": item["difficulty"],
+                    "count": item["count"],
+                    "material_id": material_id,
+                    "chapters": selected_chapters,
+                    "knowledge_points": knowledge_points,
+                    "extra": extra.strip(),
+                })
                 qs.add_question_tasks(new_tasks)
                 _reset_current_question_config(allowed_types[0])
                 st.success(f"已添加 {len(new_tasks)} 条任务到任务栏。")
@@ -1388,8 +1387,8 @@ def tab_question_gen():
     bar_df = st.data_editor(
         bar_source_df, num_rows="fixed", key="question_task_bar",
         column_order=["勾选", "学科", "年级", "题型", "难度", "数量",
-                      "知识点", "补充要求"],
-        disabled=["学科", "年级", "题型", "难度", "数量", "知识点", "补充要求"],
+                      "章节", "知识点", "补充要求"],
+        disabled=["学科", "年级", "题型", "难度", "数量", "章节", "知识点", "补充要求"],
         column_config={
             "勾选": st.column_config.CheckboxColumn("勾选", default=True),
             "学科": st.column_config.TextColumn("学科"),
@@ -1470,17 +1469,19 @@ def _question_task_bar_dataframe(tasks: list[dict]) -> pd.DataFrame:
             "题型": task["question_type"],
             "难度": task["difficulty"],
             "数量": task["count"],
+            "章节": "、".join(task.get("chapters", [])),
             "知识点": "、".join(task["knowledge_points"]),
             "补充要求": task["extra"],
             "task_id": task["task_id"],
         })
     return pd.DataFrame(rows, columns=[
         "勾选", "学科", "年级", "题型", "难度", "数量",
-        "知识点", "补充要求", "task_id"])
+        "章节", "知识点", "补充要求", "task_id"])
 
 
 def _on_question_material_change():
-    """切换资料时清空已选知识点。"""
+    """切换资料时清空已选章节和知识点。"""
+    st.session_state["question_gen_chapters"] = []
     st.session_state["question_gen_kps"] = []
 
 
@@ -1501,29 +1502,40 @@ def _question_gen_material(subject):
 
 
 def _knowledge_point_picker(subject, material_id):
-    """合并资料章节和题库知识点，支持手动补充。"""
-    options = []
+    """章节（资料相关）和知识点（题库相关）分开选择。
+    返回 (chapters, knowledge_points)。"""
+    # 第一部分：章节（来自资料）
+    chapter_options = []
     if material_id is not None:
-        # 优先从数据库chapter_info读取章节
-        options.extend(_load_material_chapter_titles(material_id))
+        chapter_options = _load_material_chapter_titles(material_id)
+    st.multiselect(
+        "📖 参考章节（来自资料，可多选）", chapter_options,
+        key="question_gen_chapters",
+        disabled=material_id is None,
+        help="选择资料后可选择对应章节")
+
+    # 第二部分：知识点（来自题库）
+    kp_options = []
     with SessionLocal() as session:
         questions = qs.list_questions(session, subject=subject)
         for question in questions:
-            options.extend(qs.knowledge_points_list(question))
-    options = list(dict.fromkeys(options))
+            kp_options.extend(qs.knowledge_points_list(question))
+    kp_options = list(dict.fromkeys(kp_options))
 
-    current = st.session_state.get("question_gen_kps", [])
-    current = [item for item in current if item in options]
-    st.session_state["question_gen_kps"] = current
     row1, row2 = st.columns(2)
-    selected = row1.multiselect("知识点（可多选）", options,
-                                key="question_gen_kps")
-    manual = row2.text_input("手动补充知识点（逗号分隔）",
-                             key="question_gen_manual_kps")
+    selected_kps = row1.multiselect(
+        "🏷️ 知识点（来自题库，可多选）", kp_options,
+        key="question_gen_kps")
+    manual = row2.text_input(
+        "手动补充知识点（逗号分隔）",
+        key="question_gen_manual_kps")
     if manual.strip():
-        selected = list(selected) + [
+        selected_kps = list(selected_kps) + [
             x.strip() for x in re.split(r"[，,、;；]", manual) if x.strip()]
-    return list(dict.fromkeys(selected))
+
+    chapters = list(st.session_state.get("question_gen_chapters", []))
+    knowledge_points = list(dict.fromkeys(selected_kps))
+    return chapters, knowledge_points
 
 
 def _generate_selected_question_tasks(selected_tasks: list[dict]):
