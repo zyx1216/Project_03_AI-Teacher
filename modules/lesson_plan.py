@@ -288,9 +288,12 @@ def tab_materials():
         pasted = ""
         web_url = ""
         if file_type in ("pdf", "word"):
+            # 动态 key：保存成功后 counter+1，强制重建组件以清空文件显示
+            _upload_counter = st.session_state.get("material_upload_counter", 0)
             uploaded = st.file_uploader(
                 "选择课本文件", type=["pdf"] if file_type == "pdf" else ["docx"],
-                label_visibility="collapsed", key="material_upload")
+                label_visibility="collapsed",
+                key=f"material_upload_{_upload_counter}")
         elif file_type == "link":
             web_url = st.text_input(
                 "网络导入",
@@ -790,7 +793,7 @@ def _preview_pending():
             material.publish_original_file(saved_id, ptype, source_bytes)
         _start_auto_index(saved_id, chapters)
         st.session_state.pop("mt_pending", None)
-        st.session_state.pop("material_upload", None)
+        st.session_state["material_upload_counter"] = st.session_state.get("material_upload_counter", 0) + 1
         _set_materials_notice(
             f"资料已保存（id={saved_id}），正在后台建立索引……")
         st.rerun()
