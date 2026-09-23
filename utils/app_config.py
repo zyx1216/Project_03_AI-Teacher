@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """学科、年级常量与校验。
 
-v1.3.0 起不再保存“全局当前学科”；各功能自己的选择由 feature_subjects 管理。
-v1.6.3 起初中年级在界面统一显示为“初一/初二/初三”，数据库仍存“七/八/九年级”，
+v1.3.0 起不再保存"全局当前学科"；各功能自己的选择由 feature_subjects 管理。
+v1.6.3 起初中年级在界面统一显示为"初一/初二/初三"，数据库仍存"七/八/九年级"，
 由本模块的双向映射函数负责转换，不批量改库。
 """
 
@@ -56,5 +56,62 @@ def is_valid_subject(subject: Any) -> bool:
 
 
 def is_valid_grade(grade: Any) -> bool:
-    """判断年级是否受支持；“未指定”也是合法选项（按存储口径）。"""
+    """判断年级是否受支持；"未指定"也是合法选项（按存储口径）。"""
     return isinstance(grade, str) and grade in GRADE_CHOICES
+
+
+def detect_grade_from_title(title: str) -> str:
+    """
+    根据资料标题自动判定年级，返回界面显示名（如"三年级"、"初一"、"高一"）。
+    无法判定时返回空字符串。
+
+    支持的标题格式：
+    - 小学：一年级、二年级...六年级，1年级、2年级...6年级
+    - 初中：初一/七年级、初二/八年级、初三/九年级，7年级、8年级、9年级
+    - 高中：高一、高二、高三，十年级、十一年级、十二年级，10年级、11年级、12年级
+    - 上册/下册不影响年级判定
+    """
+    if not isinstance(title, str) or not title.strip():
+        return ""
+
+    text = title.strip()
+
+    # 高中判定（优先，避免"高一"被误判）
+    high_school_map = {
+        "高一": "高一", "高二": "高二", "高三": "高三",
+        "十年级": "高一", "十一年级": "高二", "十二年级": "高三",
+        "10年级": "高一", "11年级": "高二", "12年级": "高三",
+    }
+    for keyword, grade in high_school_map.items():
+        if keyword in text:
+            return grade
+
+    # 初中判定
+    junior_high_map = {
+        "初一": "初一", "初二": "初二", "初三": "初三",
+        "七年级": "初一", "八年级": "初二", "九年级": "初三",
+        "7年级": "初一", "8年级": "初二", "9年级": "初三",
+    }
+    for keyword, grade in junior_high_map.items():
+        if keyword in text:
+            return grade
+
+    # 小学判定（中文数字）
+    primary_map_cn = {
+        "一年级": "一年级", "二年级": "二年级", "三年级": "三年级",
+        "四年级": "四年级", "五年级": "五年级", "六年级": "六年级",
+    }
+    for keyword, grade in primary_map_cn.items():
+        if keyword in text:
+            return grade
+
+    # 小学判定（阿拉伯数字）
+    primary_map_num = {
+        "1年级": "一年级", "2年级": "二年级", "3年级": "三年级",
+        "4年级": "四年级", "5年级": "五年级", "6年级": "六年级",
+    }
+    for keyword, grade in primary_map_num.items():
+        if keyword in text:
+            return grade
+
+    return ""
