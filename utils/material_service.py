@@ -662,17 +662,68 @@ def apply_page_offset(chapters: list[dict], offset: int, page_count: int) -> lis
     return sorted(result, key=lambda item: (item["page"], item["level"], item["title"]))
 
 
+def _extract_page_text_by_position(page) -> str:
+    """按位置提取页面文本，正确处理两栏布局：先按y分组，再按x排序。"""
+    blocks = page.get_text("dict")["blocks"]
+    # 收集所有文本片段：(y, x, text)
+    spans = []
+    for block in blocks:
+        if "lines" not in block:
+            continue
+        for line in block["lines"]:
+            for span in line["spans"]:
+                text = span["text"].strip()
+                if text:
+                    x, y = span["origin"]
+                    spans.append((round(y, 0), round(x, 0), text))
+
+    if not spans:
+        return page.get_text("text")
+
+    # 按y坐标分组（同一行，允许±5像素误差）
+    spans.sort(key=lambda s: (s[0], s[1]))
+    rows = []
+    current_y = None
+    current_row = []
+    for y, x, text in spans:
+        if current_y is None or abs(y - current_y) > 8:
+            if current_row:
+                rows.append(current_row)
+            current_y = y
+            current_row = [(x, text)]
+        else:
+            current_row.append((x, text))
+    if current_row:
+        rows.append(current_row)
+
+    # 每行按x排序，合并文本
+    lines = []
+    for row in rows:
+        row.sort(key=lambda r: r[0])
+        line_text = " ".join(t for _, t in row)
+        lines.append(line_text)
+
+    return "\n".join(lines)
+
+
 def build_toc_source_text(file_bytes: bytes) -> str:
-    """优先截取目录页附近文本；找不到目录时取前 5 页。"""
+    """优先截取目录页附近文本；找不到目录时取前 5 页。
+    v1.6.7：按位置提取，正确处理两栏布局的目录。"""
     import pymupdf
 
     with pymupdf.open(stream=io.BytesIO(bytes(file_bytes)), filetype="pdf") as doc:
-        pages = [page.get_text("text") for page in doc]
-    toc_index = next((i for i, text in enumerate(pages[:10]) if "目录" in text), -1)
-    if toc_index >= 0:
-        selected = pages[toc_index:toc_index + 3]
-    else:
-        selected = pages[:min(5, len(pages))]
+        # 先用普通文本找目录页
+        plain_pages = [page.get_text("text") for page in doc]
+        toc_index = next((i for i, text in enumerate(plain_pages[:10]) if "目录" in text), -1)
+
+        if toc_index >= 0:
+            # 目录页用按位置提取，处理两栏布局
+            selected = []
+            for i in range(toc_index, min(toc_index + 3, len(doc))):
+                selected.append(_extract_page_text_by_position(doc[i]))
+        else:
+            selected = plain_pages[:min(5, len(doc))]
+
     return "\n".join(selected).strip()[:8000]
 
 
