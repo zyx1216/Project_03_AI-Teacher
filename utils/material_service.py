@@ -566,7 +566,8 @@ def _clean_toc_title(raw: str) -> str:
 
 
 def extract_toc_by_regex(text: str) -> list[dict]:
-    """从目录文本提取标题和页码；失败返回空列表。"""
+    """从目录文本提取标题和页码；失败返回空列表。
+    v1.6.7：自动补全缺少页码的首个章节（如第一单元页码是图片无法提取时）。"""
     items = []
     seen = set()
     for line in str(text or "").splitlines():
@@ -582,7 +583,36 @@ def extract_toc_by_regex(text: str) -> list[dict]:
         if key not in seen:
             seen.add(key)
             items.append({"title": title, "page": page})
-    return sorted(items, key=lambda item: (item["page"], item["title"]))
+
+    items.sort(key=lambda item: (item["page"], item["title"]))
+
+    # 自动补全缺少页码的首个章节
+    # 如果第一个章节的页码 > 5，说明前面可能缺少"第一单元"等章节
+    if items and items[0]["page"] > 5:
+        lines = str(text or "").splitlines()
+        # 搜索"第一"开头的标题行（没有页码的）
+        first_unit_patterns = [
+            re.compile(r"^\s*第\s*[一1]\s*[单元章节课]\s*.+$"),
+            re.compile(r"^\s*(?:绪论|前言|引言|开篇)\s*.+$"),
+        ]
+        for line in lines:
+            line = line.strip()
+            for pattern in first_unit_patterns:
+                if pattern.match(line):
+                    # 检查这个标题是否已经在列表中
+                    title = _clean_toc_title(line)
+                    if title and not any(title in item["title"] or item["title"] in title for item in items):
+                        # 推断页码：如果第二个章节页码已知，第一单元通常在1-5页
+                        inferred_page = 1
+                        if len(items) >= 1:
+                            # 第一单元通常比第二单元早10页左右，但至少是1
+                            inferred_page = max(1, items[0]["page"] - 10)
+                        items.insert(0, {"title": title, "page": inferred_page})
+                        break
+            if items and items[0]["page"] <= 5:
+                break
+
+    return items
 
 
 def _compact_for_match(text: str) -> str:
