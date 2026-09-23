@@ -28,6 +28,7 @@ from utils import llm_client, feature_subjects as fs
 from utils.app_config import (
     SUBJECT_NAMES, DEFAULT_SUBJECT, GRADE_CHOICES, DEFAULT_GRADE,
     DISPLAY_GRADE_CHOICES, to_storage_grade, to_display_grade,
+    detect_grade_from_title,
 )
 from utils import homework_service
 from utils import material_service as material
@@ -389,12 +390,17 @@ def _material_info_dialog():
     raw = st.session_state.get("mt_raw_pending")
     if not raw:
         return
-    st.text_input("资料名称", value=raw.get("name", ""), key="mt_dialog_name")
-    default_display = to_display_grade(DEFAULT_GRADE)
+    material_name = raw.get("name", "")
+    st.text_input("资料名称", value=material_name, key="mt_dialog_name")
+    # 根据标题自动判定年级，无法判定时默认一年级
+    detected_grade = detect_grade_from_title(material_name)
+    default_display = detected_grade if detected_grade else "一年级"
     st.selectbox("年级", DISPLAY_GRADE_CHOICES,
                  index=DISPLAY_GRADE_CHOICES.index(default_display)
-                 if default_display in DISPLAY_GRADE_CHOICES else 7,
+                 if default_display in DISPLAY_GRADE_CHOICES else 0,
                  key="mt_dialog_grade")
+    if detected_grade:
+        st.caption(f"💡 已根据标题自动识别年级：{detected_grade}")
     with st.expander("内容预览"):
         st.write(raw.get("text", "")[:1000])
 
@@ -520,13 +526,17 @@ def _render_ocr_tasks():
 @st.dialog("确认扫描件资料信息")
 def _ocr_material_dialog(task_id):
     task = ocr_tasks.load_tasks()[task_id]
-    st.text_input("资料名称", value=task.get("name", ""), key="ocr_material_name")
-    ocr_default = to_display_grade(task.get("grade")) or to_display_grade(DEFAULT_GRADE)
+    ocr_material_name = task.get("name", "")
+    st.text_input("资料名称", value=ocr_material_name, key="ocr_material_name")
+    # 根据标题自动判定年级，无法判定时默认一年级
+    ocr_detected = detect_grade_from_title(ocr_material_name)
+    ocr_default = ocr_detected if ocr_detected else "一年级"
     st.selectbox("年级", DISPLAY_GRADE_CHOICES,
                  index=DISPLAY_GRADE_CHOICES.index(ocr_default)
-                 if ocr_default in DISPLAY_GRADE_CHOICES
-                 else DISPLAY_GRADE_CHOICES.index(to_display_grade(DEFAULT_GRADE)),
+                 if ocr_default in DISPLAY_GRADE_CHOICES else 0,
                  key="ocr_material_grade")
+    if ocr_detected:
+        st.caption(f"💡 已根据标题自动识别年级：{ocr_detected}")
 
     def confirm():
         try:
