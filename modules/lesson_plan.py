@@ -893,13 +893,19 @@ def tab_lesson():
         key="lesson_grade_select",
         on_change=lambda: user_config.set_last_grade_display(st.session_state["lesson_grade_select"]))
     grade = to_storage_grade(grade_display)
+    def _on_lesson_subject_change():
+        """切换学科时重置资料和章节选择。"""
+        fs.set_feature_subject(
+            fs.LESSON_PLAN_SUBJECT, st.session_state[fs.LESSON_PLAN_SUBJECT])
+        st.session_state["lesson_material_select"] = None
+        st.session_state["lesson_chapter_select"] = []
+
     current_subject = row2.selectbox(
         "学科", SUBJECT_NAMES,
         index=SUBJECT_NAMES.index(fs.get_feature_subject(fs.LESSON_PLAN_SUBJECT))
         if fs.get_feature_subject(fs.LESSON_PLAN_SUBJECT) in SUBJECT_NAMES else 1,
         key=fs.LESSON_PLAN_SUBJECT,
-        on_change=lambda: fs.set_feature_subject(
-            fs.LESSON_PLAN_SUBJECT, st.session_state[fs.LESSON_PLAN_SUBJECT]))
+        on_change=_on_lesson_subject_change)
 
     material_id, chapters = _lesson_material_picker(current_subject)
 
@@ -969,6 +975,30 @@ def _on_lesson_material_change():
     st.session_state["lesson_chapter_select"] = []
 
 
+def _load_material_chapter_titles(material_id):
+    """从数据库chapter_info读取章节标题；读取失败时回退到文本提取。"""
+    if material_id is None:
+        return []
+    with SessionLocal() as session:
+        book = session.get(Textbook, material_id)
+        if book is None:
+            return []
+        # 优先从数据库chapter_info读取（用户确认过的章节）
+        if book.chapter_info:
+            try:
+                info = json.loads(book.chapter_info)
+                titles = [item.get("title") for item in info if item.get("title")]
+                if titles:
+                    return titles
+            except (json.JSONDecodeError, TypeError):
+                pass
+    # 回退：从文本文件提取
+    path = _text_file_path(material_id)
+    if path.exists():
+        return [c["title"] for c in material.split_chapters(path.read_text(encoding="utf-8"))]
+    return []
+
+
 def _lesson_material_picker(subject):
     """选择资料和章节；章节多选使用组件自带搜索。"""
     with SessionLocal() as session:
@@ -984,13 +1014,9 @@ def _lesson_material_picker(subject):
 
     titles = []
     if material_id is not None:
-        path = _text_file_path(material_id)
-        if not path.exists():
-            st.warning("资料全文不存在，请重新导入。")
-        else:
-            titles = [
-                c["title"]
-                for c in material.split_chapters(path.read_text(encoding="utf-8"))]
+        titles = _load_material_chapter_titles(material_id)
+        if not titles:
+            st.warning("资料章节不存在，请重新导入。")
 
     with st.container(border=True):
         selected = st.multiselect(
@@ -1248,10 +1274,16 @@ def tab_question_gen():
         on_change=lambda: user_config.set_last_grade_display(
             st.session_state["question_gen_grade"]))
     grade = to_storage_grade(grade_display)
+    def _on_question_subject_change():
+        """切换学科时重置资料和知识点选择。"""
+        st.session_state["question_gen_material"] = None
+        st.session_state["question_gen_kps"] = []
+
     subject = row2.radio(
         "学科", SUBJECT_NAMES, horizontal=True,
         index=SUBJECT_NAMES.index(DEFAULT_SUBJECT),
-        key="question_gen_subject")
+        key="question_gen_subject",
+        on_change=_on_question_subject_change)
 
     # 旧 question_drafts.json 只迁移一次；任务文件存在后不再读旧草稿。
     if not qs._question_tasks_path().exists():
@@ -1472,10 +1504,8 @@ def _knowledge_point_picker(subject, material_id):
     """合并资料章节和题库知识点，支持手动补充。"""
     options = []
     if material_id is not None:
-        path = _text_file_path(material_id)
-        if path.exists():
-            chapters = material.split_chapters(path.read_text(encoding="utf-8"))
-            options.extend(chapter["title"] for chapter in chapters)
+        # 优先从数据库chapter_info读取章节
+        options.extend(_load_material_chapter_titles(material_id))
     with SessionLocal() as session:
         questions = qs.list_questions(session, subject=subject)
         for question in questions:
