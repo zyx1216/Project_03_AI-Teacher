@@ -371,7 +371,8 @@ def _render_homework_row(hw: dict, completed: bool):
     """渲染一行作业及操作按钮。"""
     hid = hw["id"]
     with st.container(border=True):
-        c0, c1, c2, c3, c4 = st.columns([0.5, 4.6, 1, 1, 1])
+        # v1.7.7：已完成作业加删除按钮，6列布局
+        c0, c1, c2, c3, c4, c5 = st.columns([0.5, 4.2, 0.9, 0.9, 0.9, 0.9])
         c0.checkbox("选择", key=f"pick_hw_{hid}", label_visibility="collapsed")
         extra = f"完成时间：{hw['completed_at']}　" if completed else ""
         c1.markdown(
@@ -398,6 +399,8 @@ def _render_homework_row(hw: dict, completed: bool):
                     hw_svc.reopen_homework(session, hid)
                     session.commit()
                 st.rerun()
+            if c5.button("删除", key=f"del_hw_{hid}"):
+                st.session_state["confirm_del_hw"] = hid
         else:
             if c3.button("✅ 完成", key=f"finish_{hid}"):
                 with SessionLocal() as session:
