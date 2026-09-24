@@ -69,3 +69,15 @@ def init_db() -> None:
     config.ensure_dirs()
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    _migrate_due_date()
+
+def _migrate_due_date():
+    """v1.7.8：给homeworks表加due_date列。"""
+    from sqlalchemy import text, create_engine
+    import config
+    engine = create_engine(config.DATABASE_URL)
+    with engine.connect() as conn:
+        cols = [row[1] for row in conn.execute(text("PRAGMA table_info(homeworks)"))]
+        if "due_date" not in cols:
+            conn.execute(text("ALTER TABLE homeworks ADD COLUMN due_date DATETIME"))
+            conn.commit()

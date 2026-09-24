@@ -147,6 +147,7 @@ class Homework(Base):
                     comment="pending=进行中, completed=已完成")
     completed_at = Column(DateTime, nullable=True, comment="完成时间")
     last_opened_at = Column(DateTime, nullable=True, comment="最近打开时间")
+    due_date = Column(DateTime, nullable=True, comment="截止时间，过期自动完成")
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
 
     questions = relationship(

@@ -62,7 +62,7 @@ def create_homework(session, name: str, homework_type: str = "after_class",
                     duration: int | None = None, remark: str | None = None,
                     is_template: bool = False, template_id: int | None = None,
                     subject: str | None = None, grade: str | None = None,
-                    status: str = "pending") -> Homework:
+                    status: str = "pending", due_date=None) -> Homework:
     """新建作业；给 template_id 时把模板里的题目（含顺序、分值）复制进来。
 
     subject 不传时使用默认学科“数学”。
@@ -75,7 +75,7 @@ def create_homework(session, name: str, homework_type: str = "after_class",
         total_score=total_score if total_score is not None else defaults["total_score"],
         duration=duration if duration is not None else defaults["duration"],
         remark=remark, is_template=is_template, status=status,
-        subject=subject or DEFAULT_SUBJECT, grade=grade)
+        subject=subject or DEFAULT_SUBJECT, grade=grade, due_date=due_date)
     session.add(hw)
     session.flush()
     if template_id is not None:
@@ -114,7 +114,8 @@ def list_homeworks(session, templates: bool = False, class_name: str | None = No
     if homework_type:
         q = q.filter(Homework.homework_type == homework_type)
     if grade:
-        q = q.filter(Homework.grade == grade)
+        # v1.7.7：年级筛选时兼容grade为NULL的旧作业
+        q = q.filter((Homework.grade == grade) | Homework.grade.is_(None))
     if status:
         q = q.filter(Homework.status == status)
     if keyword:

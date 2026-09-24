@@ -139,6 +139,10 @@ def _new_homework_dialog():
             "建议用时（分钟）", min_value=1, value=int(defaults["duration"]), step=5,
             key=f"new_hw_duration_{hw_type}_{nonce}")
         remark = st.text_input("说明（可选）")
+        # v1.7.8：截止时间，到点自动标记完成
+        due_date = st.date_input(
+            "截止时间（可选，到点自动标记完成）",
+            value=None, key=f"new_hw_due_{nonce}")
 
         with SessionLocal() as session:
             templates = hw_svc.list_homeworks(
@@ -172,7 +176,8 @@ def _new_homework_dialog():
                     total_score=total_score, duration=duration,
                     remark=remark.strip() or None, template_id=template_id,
                     subject=dialog_subject,
-                    grade=to_storage_grade(dialog_grade))
+                    grade=to_storage_grade(dialog_grade),
+                    due_date=due_date)
                 # 题篮：只把与新作业同学科的题带入末尾。
                 basket = list(st.session_state.get("next_hw_question_basket", []))
                 if basket:
@@ -223,8 +228,27 @@ def close_new_homework_dialog_state() -> None:
 # Tab 1：作业管理
 # ---------------------------------------------------------------------------
 
+def _auto_complete_expired():
+    """v1.7.8：自动检查过期作业，到截止时间的pending作业标记为completed。"""
+    from datetime import datetime
+    now = datetime.now()
+    with SessionLocal() as session:
+        expired = (session.query(Homework)
+                   .filter(Homework.status == "pending")
+                   .filter(Homework.due_date.isnot(None))
+                   .filter(Homework.due_date < now)
+                   .filter(Homework.is_template.is_(False))
+                   .all())
+        for hw in expired:
+            hw_svc.mark_homework_completed(session, hw.id)
+        if expired:
+            st.toast(f"已自动完成 {len(expired)} 份过期作业", icon="⏰")
+
+
 def tab_manage():
     st.subheader("作业管理")
+    # v1.7.8：自动检查过期作业，到截止时间的pending作业自动标记完成
+    _auto_complete_expired()
     c1, c2 = st.columns([3, 1])
     with c1:
         if st.button("➕ 新建作业", type="primary"):
@@ -292,6 +316,7 @@ def _homework_list():
             "id": h.id, "name": h.name, "class_name": h.class_name,
             "type": h.homework_type, "n": len(h.questions),
             "total": h.total_score or 0, "duration": h.duration or 0,
+            "due_date": h.due_date, "grade": h.grade,
             "grade": h.grade,
         } for h in homeworks]
         tpl_items = [{
@@ -363,11 +388,20 @@ def _render_homework_row(hw: dict):
     with st.container(border=True):
         c0, c1, c2, c3, c4 = st.columns([0.5, 4.6, 0.9, 0.9, 0.9])
         c0.checkbox("选择", key=f"pick_hw_{hid}", label_visibility="collapsed")
+        # v1.7.8：截止时间显示，过期标红
+        from datetime import datetime
+        due_raw = hw.get("due_date")
+        if due_raw:
+            due_dt = due_raw if isinstance(due_raw, datetime) else datetime.fromisoformat(str(due_raw))
+            is_overdue = due_dt < datetime.now()
+            due_str = f"📅 截止 {due_dt.strftime('%m-%d')}" + (" ⚠️" if is_overdue else "")
+        else:
+            due_str = ""
         c1.markdown(
             f"{hw_svc.type_emoji(hw['type'])} **{hw['name']}**　"
             f"（{to_display_grade(hw['grade']) or '未指定'}）　"
             f"{hw['class_name'] or ''}　{hw['n']} 题　"
-            f"满分 {hw['total']}　{hw['duration']} 分钟")
+            f"满分 {hw['total']}　{hw['duration']} 分钟　{due_str}")
         if c2.button("打开编辑", key=f"open_{hid}"):
             with SessionLocal() as session:
                 hw_svc.touch_homework(session, hid)
