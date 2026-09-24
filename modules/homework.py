@@ -799,8 +799,11 @@ def _smart_compose_config_ui():
                 key="smart_compose_duration")
 
     with SessionLocal() as session:
+        # v1.7.7：资料按学科+年级过滤，grade为NULL的旧资料兼容显示
+        storage_grade = to_storage_grade(grade)
         materials = (session.query(Textbook)
                      .filter(Textbook.subject == subject)
+                     .filter((Textbook.grade == storage_grade) | Textbook.grade.is_(None))
                      .order_by(Textbook.id.desc()).all())
         material_labels = {book.id: book.name for book in materials}
 

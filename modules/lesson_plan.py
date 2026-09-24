@@ -908,7 +908,7 @@ def tab_lesson():
         key=fs.LESSON_PLAN_SUBJECT,
         on_change=_on_lesson_subject_change)
 
-    material_id, chapters = _lesson_material_picker(current_subject)
+    material_id, chapters = _lesson_material_picker(current_subject, grade_display)
 
     st.markdown("**📝 备课参数**")
     topic = st.text_input("课题 *", placeholder="如：一元二次方程的求根公式")
@@ -1031,12 +1031,17 @@ def _chapter_content_map(material_id):
     return result
 
 
-def _lesson_material_picker(subject):
+def _lesson_material_picker(subject, grade):
     """选择资料和章节；章节多选使用组件自带搜索。"""
     with SessionLocal() as session:
-        books = (session.query(Textbook)
-                 .filter(((Textbook.subject == subject) | Textbook.subject.is_(None)))
-                 .order_by(Textbook.id.desc()).all())
+        # v1.7.7：资料按学科+年级过滤，grade为NULL的旧资料兼容显示
+        storage_grade = to_storage_grade(grade) if grade else None
+        query = session.query(Textbook).filter(
+            (Textbook.subject == subject) | Textbook.subject.is_(None))
+        if storage_grade:
+            query = query.filter(
+                (Textbook.grade == storage_grade) | Textbook.grade.is_(None))
+        books = query.order_by(Textbook.id.desc()).all()
         options = [None] + [book.id for book in books]
         labels = ["不使用资料"] + [book.name for book in books]
         material_id = st.selectbox(
@@ -1342,7 +1347,7 @@ def tab_question_gen():
         st.session_state[QUESTION_TASK_ROWS_KEY] = pd.DataFrame(
             columns=["题型", "难度", "数量", "删除"])
 
-    material_id = _question_gen_material(subject)
+    material_id = _question_gen_material(subject, grade)
     selected_chapters, knowledge_points = _knowledge_point_picker(subject, material_id)
     st.caption("当前年级和学科可选题型：" + "、".join(allowed_types))
     st.caption("难度：1=基础，2=中等，3=拓展")
@@ -1605,12 +1610,17 @@ def _on_question_material_change():
     st.session_state["question_gen_manual_kps"] = ""
 
 
-def _question_gen_material(subject):
+def _question_gen_material(subject, grade):
     """单条新任务的可选资料；不选资料也能生成。"""
     with SessionLocal() as session:
-        books = (session.query(Textbook)
-                 .filter((Textbook.subject == subject) | Textbook.subject.is_(None))
-                 .order_by(Textbook.id.desc()).all())
+        # v1.7.7：资料按学科+年级过滤，grade为NULL的旧资料兼容显示
+        storage_grade = to_storage_grade(grade) if grade else None
+        query = session.query(Textbook).filter(
+            (Textbook.subject == subject) | Textbook.subject.is_(None))
+        if storage_grade:
+            query = query.filter(
+                (Textbook.grade == storage_grade) | Textbook.grade.is_(None))
+        books = query.order_by(Textbook.id.desc()).all()
     options = [None] + [book.id for book in books]
     labels = ["不使用资料"] + [book.name for book in books]
     current = st.session_state.get("question_gen_material")

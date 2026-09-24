@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 全局配置模块。
 
@@ -29,7 +29,7 @@ VERSIONS_DIR = BASE_DIR / "versions"
 
 # 应用信息。界面标题固定，不再随学科切换（学科仅用于资料归属和导出命名）。
 APP_NAME = "AI教学辅助"
-APP_VERSION = "1.7.6"
+APP_VERSION = "1.7.7"
 
 # LLM 默认配置（阶段 0 不调用，仅占位；真实 Key 在设置页配置，不写进代码）
 DEFAULT_API_BASE = "https://api.deepseek.com"
