@@ -233,11 +233,15 @@ def test_smart_compose_panel_is_available_for_non_exam_isolated(tmp_path):
     assert "smart_compose_material" in select_keys
     assert "选择知识点（可选，题库和 AI 都按此约束）" in multi_labels
     assert "smart_compose_kps" in multi_keys
-    assert "选择章节（可选，用于约束 AI 补题）" in multi_labels
+    assert "选择章节（可选，只用于约束 AI 补题）" in multi_labels
     assert "smart_compose_chapters" in multi_keys
-    assert {"基础占比%", "中等占比%", "拓展占比%"} <= set(slider_labels.split())
-    assert {"smart_compose_p1", "smart_compose_p2", "smart_compose_p3"} <= slider_keys
-    assert any(item.key == "smart_compose_type_rows" for item in at.dataframe)
+    number_keys = {item.key for item in at.number_input}
+    assert {
+        "smart_easy_0", "smart_medium_0", "smart_hard_0",
+        "smart_compose_total", "smart_compose_duration",
+    } <= number_keys
+    assert "smart_type_0" in select_keys
+    assert not any(item.key.startswith("smart_compose_p") for item in at.slider)
     assert any(item.key == "smart_compose_run" for item in at.button)
     assert any(item.key == "bank_grade_1" for item in at.selectbox)
     engine.dispose()

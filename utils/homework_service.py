@@ -14,6 +14,11 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
+from datetime import datetime
+from pathlib import Path
+
 from models.models import Homework, HomeworkQuestion, Question
 from utils.app_config import DEFAULT_SUBJECT, to_display_grade
 from utils import llm_client
@@ -56,7 +61,8 @@ def create_homework(session, name: str, homework_type: str = "after_class",
                     class_name: str | None = None, total_score: float | None = None,
                     duration: int | None = None, remark: str | None = None,
                     is_template: bool = False, template_id: int | None = None,
-                    subject: str | None = None, grade: str | None = None) -> Homework:
+                    subject: str | None = None, grade: str | None = None,
+                    status: str = "pending") -> Homework:
     """新建作业；给 template_id 时把模板里的题目（含顺序、分值）复制进来。
 
     subject 不传时使用默认学科“数学”。
@@ -68,7 +74,7 @@ def create_homework(session, name: str, homework_type: str = "after_class",
         name=name.strip(), homework_type=homework_type, class_name=class_name,
         total_score=total_score if total_score is not None else defaults["total_score"],
         duration=duration if duration is not None else defaults["duration"],
-        remark=remark, is_template=is_template,
+        remark=remark, is_template=is_template, status=status,
         subject=subject or DEFAULT_SUBJECT, grade=grade)
     session.add(hw)
     session.flush()
@@ -92,10 +98,13 @@ def copy_template_questions(session, template_id: int, homework_id: int) -> int:
 
 def list_homeworks(session, templates: bool = False, class_name: str | None = None,
                    subject: str | None = None, keyword: str | None = None,
-                   homework_type: str | None = None):
-    """作业列表（默认只列普通作业），按创建时间倒序。
+                   homework_type: str | None = None, grade: str | None = None,
+                   status: str | None = None, exclude_types: list[str] | None = None,
+                   sort_order: str = "created_desc"):
+    """作业列表。
 
-    keyword 模糊匹配作业名称；homework_type 精确匹配五类作业。
+    grade 按存储年级精确匹配；exclude_types 用于作业管理排除试卷；
+    sort_order 支持 created_desc/created_asc/opened_desc。
     """
     q = session.query(Homework).filter(Homework.is_template.is_(templates))
     if class_name:
@@ -104,9 +113,23 @@ def list_homeworks(session, templates: bool = False, class_name: str | None = No
         q = q.filter(Homework.subject == subject)
     if homework_type:
         q = q.filter(Homework.homework_type == homework_type)
+    if grade:
+        q = q.filter(Homework.grade == grade)
+    if status:
+        q = q.filter(Homework.status == status)
     if keyword:
         q = q.filter(Homework.name.like(f"%{keyword.strip()}%"))
-    return q.order_by(Homework.created_at.desc(), Homework.id.desc()).all()
+
+    order_map = {
+        "created_desc": (Homework.created_at.desc(), Homework.id.desc()),
+        "created_asc": (Homework.created_at.asc(), Homework.id.asc()),
+        "opened_desc": (Homework.last_opened_at.desc(), Homework.created_at.desc()),
+    }
+    order_args = order_map.get(sort_order, order_map["created_desc"])
+    items = q.order_by(*order_args).all()
+    if exclude_types:
+        items = [item for item in items if item.homework_type not in set(exclude_types)]
+    return items
 
 
 def list_homework_classes(session, subject: str | None = None) -> list[str]:
@@ -125,7 +148,8 @@ def get_homework(session, homework_id: int) -> Homework | None:
 
 
 def update_homework(session, homework_id: int, **fields) -> None:
-    allowed = {"name", "homework_type", "class_name", "total_score", "duration", "remark"}
+    allowed = {"name", "homework_type", "class_name", "total_score", "duration",
+           "remark", "status", "completed_at", "last_opened_at"}
     hw = session.get(Homework, homework_id)
     if hw is None:
         raise ValueError(f"作业不存在：id={homework_id}")
@@ -249,7 +273,8 @@ def save_as_template(session, homework_id: int, template_name: str | None = None
         name=(template_name or f"{src.name}（模板）").strip(),
         homework_type=src.homework_type, class_name=src.class_name,
         total_score=src.total_score, duration=src.duration, remark=src.remark,
-        is_template=True, subject=src.subject or DEFAULT_SUBJECT, grade=src.grade)
+        is_template=True, subject=src.subject or DEFAULT_SUBJECT, grade=src.grade,
+        status="pending", completed_at=None, last_opened_at=None)
     session.add(tpl)
     session.flush()
     copy_template_questions(session, src.id, tpl.id)
@@ -266,6 +291,12 @@ def homework_questions(session, homework_id: int) -> list[tuple[HomeworkQuestion
             .filter(HomeworkQuestion.homework_id == homework_id)
             .order_by(HomeworkQuestion.order, HomeworkQuestion.id).all())
     return rows
+
+
+def question_count(session, homework_id: int) -> int:
+    """统计作业内题目数。"""
+    return (session.query(HomeworkQuestion)
+            .filter(HomeworkQuestion.homework_id == homework_id).count())
 
 
 def question_ids_in_homework(session, homework_id: int) -> set[int]:
@@ -360,9 +391,133 @@ def export_word(session, homework_id: int, with_answer: bool) -> bytes:
     title = f"{hw.name}（教师卷）" if with_answer else hw.name
     return qs.export_questions_word(questions, with_answer=with_answer, title=title)
 
+
+def mark_homework_completed(session, homework_id: int, completed_at=None) -> Homework:
+    """把作业标记为已完成。"""
+    hw = session.get(Homework, homework_id)
+    if hw is None:
+        raise ValueError(f"作业不存在：id={homework_id}")
+    hw.status = "completed"
+    hw.completed_at = completed_at or datetime.now()
+    session.flush()
+    return hw
+
+
+def reopen_homework(session, homework_id: int) -> Homework:
+    """重新打开已完成作业。"""
+    hw = session.get(Homework, homework_id)
+    if hw is None:
+        raise ValueError(f"作业不存在：id={homework_id}")
+    hw.status = "pending"
+    hw.completed_at = None
+    session.flush()
+    return hw
+
+
+def duplicate_homework(session, homework_id: int, new_name: str | None = None) -> Homework:
+    """复制作业和题目关联；成绩、作答不复制。"""
+    src = session.get(Homework, homework_id)
+    if src is None:
+        raise ValueError(f"作业不存在：id={homework_id}")
+    name = (new_name or f"{src.name}（副本）").strip()
+    clone = Homework(
+        name=name, homework_type=src.homework_type, class_name=src.class_name,
+        total_score=src.total_score, duration=src.duration, remark=src.remark,
+        is_template=False, subject=src.subject or DEFAULT_SUBJECT, grade=src.grade,
+        status="pending", completed_at=None, last_opened_at=None)
+    session.add(clone)
+    session.flush()
+    copy_template_questions(session, src.id, clone.id)
+    return clone
+
+
+def touch_homework(session, homework_id: int) -> None:
+    """更新最近打开时间。"""
+    hw = session.get(Homework, homework_id)
+    if hw is not None:
+        hw.last_opened_at = datetime.now()
+        session.flush()
+
+
+def export_homeworks_zip(session, homework_ids: list[int], with_answer: bool = False) -> bytes:
+    """批量导出多份作业 Word，并打成 ZIP。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        used_names = set()
+        for hid in dict.fromkeys(int(x) for x in homework_ids):
+            hw = session.get(Homework, hid)
+            if hw is None:
+                continue
+            data = export_word(session, hid, with_answer=with_answer)
+            base = f"{hw.name}-{'教师卷' if with_answer else '学生卷'}.docx"
+            file_name = base
+            index = 2
+            while file_name in used_names:
+                file_name = f"{Path(base).stem}_{index}.docx"
+                index += 1
+            used_names.add(file_name)
+            zf.writestr(file_name, data)
+    return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # AI 自动组卷：规则抽题为主，缺口调内容模型补齐
 # ---------------------------------------------------------------------------
+
+def normalize_compose_slots(spec: dict) -> list[dict]:
+    """把新旧组卷规格统一展开成逐题槽位。"""
+    if not isinstance(spec, dict):
+        raise ValueError("组卷规格格式不正确。")
+    if "slots" in spec:
+        slots = []
+        for item in spec["slots"]:
+            qtype = str(item.get("question_type") or "").strip()
+            if qtype not in {"choice", "fill", "judge", "solution"}:
+                raise ValueError(f"不支持的题型：{qtype}")
+            try:
+                difficulty = int(item.get("difficulty"))
+                count = int(item.get("count"))
+            except (TypeError, ValueError):
+                raise ValueError("题型难度和数量必须是整数。")
+            if difficulty not in (1, 2, 3):
+                raise ValueError("题目难度必须是 1、2、3。")
+            if count <= 0:
+                raise ValueError("题目数量必须大于 0。")
+            for _ in range(count):
+                slots.append({"question_type": qtype, "difficulty": difficulty})
+        if not slots:
+            raise ValueError("请至少配置一道题。")
+        return slots
+    return hstat.plan_paper_slots(spec)
+
+
+def slots_from_type_matrix(rows: list[dict]) -> list[dict]:
+    """把页面的“题型 × 难度数量”矩阵转换成新 slots 规格。"""
+    slots: list[dict] = []
+    for row in rows or []:
+        type_name = str(row.get("type") or "").strip()
+        alias_key = type_name.lower().replace(" ", "")
+        qtype = qs.EXTENDED_TYPE_ALIASES.get(alias_key)
+        if qtype is None:
+            raise ValueError(f"暂不支持的题型：{type_name}")
+        for difficulty, key_name in (
+                (1, "easy"), (2, "medium"), (3, "hard")):
+            try:
+                count = int(row.get(key_name) or 0)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("题目数量必须是整数。") from exc
+            if count < 0:
+                raise ValueError("题目数量不能小于 0。")
+            for _ in range(count):
+                slots.append({
+                    "question_type": qtype,
+                    "difficulty": difficulty,
+                    "count": 1,
+                })
+    if not slots:
+        raise ValueError("请至少配置一道题。")
+    return slots
+
 
 def auto_compose(session, homework_id: int, spec: dict,
                  knowledge_points: list[str] | None = None,
@@ -379,7 +534,7 @@ def auto_compose(session, homework_id: int, spec: dict,
     if hw is None:
         raise ValueError(f"作业不存在：id={homework_id}")
 
-    slots = hstat.plan_paper_slots(spec)
+    slots = normalize_compose_slots(spec)
     cur_subject = hw.subject or DEFAULT_SUBJECT
     pool = qs.list_questions(session, status="approved", subject=cur_subject)
     wanted_kps = [str(kp).strip() for kp in (knowledge_points or []) if str(kp).strip()]

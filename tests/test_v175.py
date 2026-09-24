@@ -207,7 +207,7 @@ def test_historical_exam_opens_without_smart_compose_editor_tab(tmp_path):
 
     at = _apptest(db_file, tmp_path)
     _open_homework_page(at)
-    next(b for b in at.button if b.key == f"open_{exam_id}").click().run()
+    next(b for b in at.button if b.key == f"open_exam_{exam_id}").click().run()
     assert not at.exception
 
     expected = ["从题库选题", "AI 即时出题", "外部导入", "手动添加"]
