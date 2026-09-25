@@ -124,10 +124,45 @@ def _new_homework_dialog():
         fs.HOMEWORK_NEW_SUBJECT, caption="新作业学科，不影响下方作业列表的筛选。")
     dialog_grade = st.selectbox(
         "年级", DISPLAY_GRADE_CHOICES, index=0, key="hw_new_grade")
+
+    # v1.7.9：关联资料和章节，选章节后自动填充作业名
+    from models.models import Textbook
+    storage_grade = to_storage_grade(dialog_grade)
+    with SessionLocal() as session:
+        query = session.query(Textbook).filter(
+            (Textbook.subject == dialog_subject) | Textbook.subject.is_(None))
+        if storage_grade:
+            query = query.filter(
+                (Textbook.grade == storage_grade) | Textbook.grade.is_(None))
+        books = query.order_by(Textbook.id.desc()).all()
+    book_options = [None] + [b.id for b in books]
+    book_labels = ["不关联资料"] + [b.name for b in books]
+    dialog_material = st.selectbox(
+        "关联资料（可选）", book_options,
+        format_func=lambda x: book_labels[book_options.index(x)],
+        key="hw_new_material",
+        help="选了资料后可选择章节，自动填充作业名")
+
+    chapter_titles = []
+    if dialog_material is not None:
+        from modules.lesson_plan import _load_material_chapter_titles
+        chapter_titles = _load_material_chapter_titles(dialog_material)
+    chapter_options = [None] + chapter_titles
+    dialog_chapter = st.selectbox(
+        "关联章节（可选）", chapter_options,
+        format_func=lambda x: "不选章节" if x is None else x,
+        key="hw_new_chapter",
+        disabled=dialog_material is None,
+        help="选了章节后自动填充作业名，可手动修改")
+
     defaults = hw_svc.DEFAULT_PARAMS[hw_type]
     nonce = st.session_state.get("hw_new_dialog_nonce", 0)
     with st.form("new_homework_form"):
-        name = st.text_input("作业名称 *",
+        # v1.7.9：选了章节后自动填充作业名
+        auto_name = ""
+        if dialog_chapter:
+            auto_name = f"{dialog_chapter}·{hw_svc.type_label(hw_type)}"
+        name = st.text_input("作业名称 *", value=auto_name,
                              placeholder=f"如：{hw_svc.type_label(hw_type)}·一元二次方程")
         c1, c2, c3 = st.columns(3)
         class_name = c1.text_input("适用班级")
@@ -177,7 +212,9 @@ def _new_homework_dialog():
                     remark=remark.strip() or None, template_id=template_id,
                     subject=dialog_subject,
                     grade=to_storage_grade(dialog_grade),
-                    due_date=due_date)
+                    due_date=due_date,
+                    material_id=dialog_material,
+                    chapter=dialog_chapter)
                 # 题篮：只把与新作业同学科的题带入末尾。
                 basket = list(st.session_state.get("next_hw_question_basket", []))
                 if basket:
@@ -317,6 +354,7 @@ def _homework_list():
             "type": h.homework_type, "n": len(h.questions),
             "total": h.total_score or 0, "duration": h.duration or 0,
             "due_date": h.due_date, "grade": h.grade,
+            "material_id": h.material_id, "chapter": h.chapter,
             "grade": h.grade,
         } for h in homeworks]
         tpl_items = [{
@@ -401,7 +439,8 @@ def _render_homework_row(hw: dict):
             f"{hw_svc.type_emoji(hw['type'])} **{hw['name']}**　"
             f"（{to_display_grade(hw['grade']) or '未指定'}）　"
             f"{hw['class_name'] or ''}　{hw['n']} 题　"
-            f"满分 {hw['total']}　{hw['duration']} 分钟　{due_str}")
+            f"满分 {hw['total']}　{hw['duration']} 分钟　{due_str}"
+            f"{'　📖 ' + hw['chapter'] if hw.get('chapter') else ''}")
         if c2.button("打开编辑", key=f"open_{hid}"):
             with SessionLocal() as session:
                 hw_svc.touch_homework(session, hid)
