@@ -62,7 +62,8 @@ def create_homework(session, name: str, homework_type: str = "after_class",
                     duration: int | None = None, remark: str | None = None,
                     is_template: bool = False, template_id: int | None = None,
                     subject: str | None = None, grade: str | None = None,
-                    status: str = "pending", due_date=None) -> Homework:
+                    status: str = "pending", due_date=None,
+                    material_id=None, chapter=None) -> Homework:
     """新建作业；给 template_id 时把模板里的题目（含顺序、分值）复制进来。
 
     subject 不传时使用默认学科“数学”。
@@ -75,7 +76,8 @@ def create_homework(session, name: str, homework_type: str = "after_class",
         total_score=total_score if total_score is not None else defaults["total_score"],
         duration=duration if duration is not None else defaults["duration"],
         remark=remark, is_template=is_template, status=status,
-        subject=subject or DEFAULT_SUBJECT, grade=grade, due_date=due_date)
+        subject=subject or DEFAULT_SUBJECT, grade=grade, due_date=due_date,
+        material_id=material_id, chapter=chapter)
     session.add(hw)
     session.flush()
     if template_id is not None:

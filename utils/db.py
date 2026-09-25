@@ -72,7 +72,7 @@ def init_db() -> None:
     _migrate_due_date()
 
 def _migrate_due_date():
-    """v1.7.8：给homeworks表加due_date列。"""
+    """v1.7.8：给homeworks表加due_date、material_id、chapter列。"""
     from sqlalchemy import text, create_engine
     import config
     engine = create_engine(config.DATABASE_URL)
@@ -80,4 +80,8 @@ def _migrate_due_date():
         cols = [row[1] for row in conn.execute(text("PRAGMA table_info(homeworks)"))]
         if "due_date" not in cols:
             conn.execute(text("ALTER TABLE homeworks ADD COLUMN due_date DATETIME"))
-            conn.commit()
+        if "material_id" not in cols:
+            conn.execute(text("ALTER TABLE homeworks ADD COLUMN material_id INTEGER"))
+        if "chapter" not in cols:
+            conn.execute(text("ALTER TABLE homeworks ADD COLUMN chapter VARCHAR(200)"))
+        conn.commit()
