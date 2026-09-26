@@ -1259,6 +1259,26 @@ def _edit_lesson():
             st.download_button(
                 "⬇️ 下载 Word 文档", data, file_name=f"{_final_title()}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    # v1.9.0：导出 PDF（PyMuPDF Story 直出，支持中文）
+    if st.button("📄 导出 PDF", key="lesson_export_pdf"):
+        if not meta.get("plan_id"):
+            st.warning("请先保存教案，再导出 PDF。")
+        else:
+            try:
+                from utils import export_service
+                with SessionLocal() as _pdf_s:
+                    _lesson = lesson_svc.get_plan_by_id(_pdf_s, meta["plan_id"])
+                    if _lesson:
+                        _pdf_bytes = export_service.lesson_plan_pdf(_lesson, plan)
+                        st.download_button(
+                            "⬇️ 下载 PDF", _pdf_bytes,
+                            file_name=f"{_final_title()}.pdf",
+                            mime="application/pdf", key="dl_lesson_pdf")
+                    else:
+                        st.error("未找到教案记录。")
+            except Exception as _pdf_exc:
+                st.error(f"PDF 导出失败：{_pdf_exc}")
+
     if c_discard.button("清空当前编辑"):
         for k in ("lp_plan", "lp_meta"):
             st.session_state.pop(k, None)
@@ -1353,6 +1373,11 @@ def _saved_lessons():
                 if c4.button("📜 历史版本", key=f"versions_{lesson.id}"):
                     st.session_state["lesson_versions_dialog_id"] = lesson.id
                 if c5.button("删除", key=f"del_plan_{lesson.id}"):
+                    from utils import undo_service
+                    undo_service.record(
+                        session, "delete_lesson_plan",
+                        {"target": (LessonPlan, lesson.id)},
+                        f"删除教案：{lesson.title}")
                     lesson_svc.delete_plan(session, lesson.id)
                     session.commit()
                     st.rerun()
@@ -2117,11 +2142,13 @@ def _question_filters():
                     st.session_state["bank_batch_last"] = (
                         f"已批量修改 {n} 道题。")
                     st.rerun()
-        ex1, ex2 = st.columns(2)
-        student_label = (f"📄 导出所选习题卷（仅题目，已选 {sel_n} 题）"
+        ex1, ex2, ex3 = st.columns(3)
+        student_label = (f"📄 导出习题卷（已选 {sel_n} 题）"
                          if sel_n else "📄 导出习题卷（请先勾选）")
-        teacher_label = (f"📄 导出教师卷（含答案解析，已选 {sel_n} 题）"
+        teacher_label = (f"📄 导出教师卷（已选 {sel_n} 题）"
                          if sel_n else "📄 导出教师卷（请先勾选）")
+        latex_label = (f"📐 导出 LaTeX（已选 {sel_n} 题）"
+                       if sel_n else "📐 导出 LaTeX（请先勾选）")
         if ex1.button(student_label, key="export_selected_student"):
             if not selected_questions:
                 st.warning("请先在表格中勾选要导出的题目")
@@ -2146,6 +2173,23 @@ def _question_filters():
                     file_name=f"{current_subject}习题教师卷.docx",
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     key="dl_teacher")
+        if ex3.button(latex_label, key="export_selected_latex"):
+            if not selected_questions:
+                st.warning("请先在表格中勾选要导出的题目")
+            else:
+                try:
+                    from utils import export_service
+                    _pairs = [(q, qs.question_type_label(q.question_type))
+                              for q in selected_questions]
+                    _tex = export_service.homework_latex(
+                        type("H", (), {"name": f"{current_subject}习题集"})(),
+                        _pairs)
+                    st.download_button(
+                        "⬇️ 下载 .tex", _tex.encode("utf-8"),
+                        file_name=f"{current_subject}习题集.tex",
+                        mime="application/x-tex", key="dl_latex")
+                except Exception as _tex_exc:
+                    st.error(f"LaTeX 导出失败：{_tex_exc}")
 
         # 批量操作按钮（表格下方）
         pending_count = len([q for q in questions if q.status == "pending"])
@@ -2186,7 +2230,12 @@ def _question_filters():
                     st.caption(f"...等共 {len(del_qs)} 道题")
                 dc1, dc2 = st.columns(2)
                 if dc1.button("确认删除", type="primary", key="confirm_batch_delete"):
+                    from utils import undo_service
                     for qid in batch_delete_ids:
+                        undo_service.record(
+                            session, "delete_question",
+                            {"target": (Question, qid)},
+                            f"删除题目 #{qid}")
                         qs.delete_question(session, qid)
                     session.commit()
                     st.session_state.pop("bank_batch_delete_ids", None)
@@ -2302,6 +2351,11 @@ def _question_detail(session, q):
         if st.session_state.get("confirm_del_q") == q.id:
             cc1, cc2 = st.columns(2)
             if cc1.button("确认删除", key=f"ok_del_q_{q.id}", type="primary"):
+                from utils import undo_service
+                undo_service.record(
+                    session, "delete_question",
+                    {"target": (Question, q.id)},
+                    f"删除题目 #{q.id}")
                 qs.delete_question(session, q.id)
                 session.commit()
                 st.session_state.pop("confirm_del_q", None)

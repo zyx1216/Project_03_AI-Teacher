@@ -262,6 +262,9 @@ def list_agent_history() -> list[dict]:
 
 def _append_history(item: dict) -> None:
     rows = list_agent_history()
+    # 去重：最近一条指令相同则不重复添加
+    if rows and rows[0].get("instruction", "").strip() == item.get("instruction", "").strip():
+        return
     rows.insert(0, item)
     rows = rows[:HISTORY_LIMIT]
     AGENT_HISTORY_PATH.write_text(
@@ -269,8 +272,14 @@ def _append_history(item: dict) -> None:
 
 
 def reexecute_agent_history(session, history_id: str) -> dict:
-    """按历史 id 找到原指令并重新执行。"""
+    """按历史 id 找到原指令并重新执行（不重复追加历史记录）。"""
     for item in list_agent_history():
         if item.get("history_id") == history_id:
-            return run_instruction(session, item["instruction"])
+            return _run_without_history(session, item["instruction"])
     raise ValueError(f"找不到历史记录：{history_id}")
+
+
+def _run_without_history(session, text: str) -> dict:
+    """执行指令但不写入历史记录（供历史重新执行使用）。"""
+    parsed = parse_instruction(text)
+    return _execute_parsed(session, parsed)

@@ -406,6 +406,12 @@ def _homework_list():
         bc1, bc2 = st.columns(2)
         if bc1.button("✅ 确认批量删除", type="primary", key="hw_batch_del_ok"):
             with SessionLocal() as session:
+                from utils import undo_service
+                for _hid in pending_ids:
+                    undo_service.record(
+                        session, "delete_homework",
+                        {"target": (Homework, _hid)},
+                        f"删除作业 #{_hid}")
                 deleted_n = hw_svc.delete_homeworks(session, pending_ids)
                 session.commit()
             for pid in pending_ids:
@@ -1903,8 +1909,9 @@ def _ai_summary(session, hw, data, values):
 
 
 def _export_analysis(session, hw):
-    """把分析结果导成 Word。"""
-    if st.button("📄 导出分析报告 Word", key=f"exp_hw_{hw.id}"):
+    """把分析结果导成 Word 和 PPT。"""
+    _exp_col1, _exp_col2 = st.columns(2)
+    if _exp_col1.button("📄 导出分析报告 Word", key=f"exp_hw_{hw.id}"):
         data = hscore.analyze_homework(session, hw.id)
         import io
         from docx import Document
@@ -1928,6 +1935,18 @@ def _export_analysis(session, hw):
         st.download_button("⬇️ 下载分析报告", buf.getvalue(),
                            file_name=f"{hw.name}-分析.docx", mime=DOCX_MIME,
                            key=f"dl_analyze_{hw.id}")
+    if _exp_col2.button("📊 导出分析报告 PPT", key=f"exp_hw_ppt_{hw.id}"):
+        try:
+            from utils import export_service
+            _ppt_bytes = export_service.analysis_report_ppt(
+                session, hw.id, "homework")
+            st.download_button(
+                "⬇️ 下载 PPT", _ppt_bytes,
+                file_name=f"{hw.name}-分析.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                key=f"dl_analyze_ppt_{hw.id}")
+        except Exception as _ppt_exc:
+            st.error(f"PPT 导出失败：{_ppt_exc}")
 
 # ===========================================================================
 # Tab 4：错题本
