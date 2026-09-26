@@ -1338,6 +1338,23 @@ def _render_band_and_subject_charts(data, rank_order):
     title = f"学生总分排名（{rank_order}）"
     _render_rank_bar_chart(data["rows"], "total", title, "总分", high_to_low)
 
+    # v1.9.0：成绩分布箱线图（按班级分组）
+    st.markdown("**成绩分布箱线图**")
+    try:
+        from utils import chart_service
+        _box_rows = [{"total": r.get("total"), "class_name": r.get("class_name") or "未分班"}
+                     for r in data.get("rows", []) if r.get("total") is not None]
+        if _box_rows:
+            _has_class = any(r["class_name"] != "未分班" for r in _box_rows)
+            _fig = chart_service.score_box(
+                _box_rows, score_key="total",
+                group_key="class_name" if _has_class else None)
+            st.plotly_chart(_fig, width="stretch")
+        else:
+            st.caption("暂无成绩数据可绘制箱线图。")
+    except Exception as _box_exc:
+        st.caption(f"箱线图加载失败：{_box_exc}")
+
 
 def _delta_html(delta_info, score_label="总分"):
     if not delta_info:
@@ -2295,6 +2312,23 @@ def tab_knowledge():
         fig.update_traces(
             text=hover_text, hovertemplate="%{text}<extra></extra>")
         st.plotly_chart(fig, use_container_width=True)
+
+    # v1.9.0：知识点掌握度仪表盘（前6个，3列布局）
+    st.write("**知识点掌握度仪表盘**")
+    try:
+        from utils import chart_service
+        _gauge_items = [{"knowledge_point": r["knowledge_point"],
+                         "rate": (r["rate"] or 0) * 100} for r in rows[:6]]
+        if _gauge_items:
+            _gauges = chart_service.knowledge_gauges(_gauge_items)
+            _gauge_cols = st.columns(3)
+            for _i, _gfig in enumerate(_gauges):
+                with _gauge_cols[_i % 3]:
+                    st.plotly_chart(_gfig, use_container_width=True)
+        else:
+            st.caption("暂无知识点数据。")
+    except Exception as _gauge_exc:
+        st.caption(f"仪表盘加载失败：{_gauge_exc}")
 
     green = [r["knowledge_point"] for r in rows if r["level"] in ("优秀", "良好")]
     yellow = [r["knowledge_point"] for r in rows if r["level"] == "一般"]
