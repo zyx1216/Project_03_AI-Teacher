@@ -22,7 +22,7 @@ import streamlit as st
 from st_aggrid import AgGrid, GridUpdateMode
 
 import config
-from models.models import Textbook, LessonPlan
+from models.models import Textbook, LessonPlan, Question
 from utils.db import SessionLocal
 from utils import llm_client, feature_subjects as fs
 from utils.app_config import (
@@ -1187,10 +1187,138 @@ def _generate_lesson(topic, grade, chapter, hours, style, textbook_id,
     st.rerun()
 
 
+
+# ---------------------------------------------------------------------------
+# v1.9.1：AI 试讲
+# ---------------------------------------------------------------------------
+
+
+def _run_trial_lecture(lesson_id: int, settings: dict) -> dict:
+    """读取教案并调用服务层生成试讲脚本。"""
+    with SessionLocal() as session:
+        lesson = session.get(LessonPlan, int(lesson_id))
+        if lesson is None:
+            raise ValueError("教案不存在或已被删除。")
+        plan = lesson_svc.load_plan(lesson)
+        return lesson_svc.trial_lecture(lesson, plan, settings)
+
+
+@st.dialog("🎭 AI试讲设置")
+def _trial_settings_dialog(lesson_id: int):
+    """设置班级层次、时长和活跃度，然后生成试讲脚本。"""
+    st.selectbox("班级层次", ["基础班", "平行班", "重点班"],
+                 index=1, key="trial_class_level")
+    st.selectbox("试讲时长", [20, 40, 45], index=1,
+                 format_func=lambda x: f"{x} 分钟",
+                 key="trial_duration")
+    st.selectbox("学生活跃度", ["低", "中", "高"], index=1,
+                 key="trial_activity")
+    c1, c2 = st.columns(2)
+    if c1.button("🎭 开始试讲", type="primary", key="trial_start"):
+        settings = {
+            "class_level": st.session_state["trial_class_level"],
+            "duration": st.session_state["trial_duration"],
+            "activity": st.session_state["trial_activity"],
+        }
+        try:
+            script = _run_trial_lecture(lesson_id, settings)
+        except Exception as exc:
+            st.error(f"试讲脚本生成失败：{exc}")
+            return
+        st.session_state["trial_script"] = script
+        st.session_state["trial_settings"] = settings
+        st.session_state["trial_for_plan_id"] = int(lesson_id)
+        st.session_state.pop("trial_dialog_id", None)
+        st.rerun()
+    if c2.button("取消", key="trial_cancel"):
+        st.session_state.pop("trial_dialog_id", None)
+        st.rerun()
+
+
+def _render_trial_lines(text: str):
+    """按行渲染试讲内容，对关键提问、学生回答和应对策略做区别显示。"""
+    for line in str(text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("【关键提问】"):
+            st.info(line.replace("【关键提问】", "").strip())
+        elif line.startswith("【学生回答】"):
+            st.markdown(f"> {line.replace('【学生回答】', '').strip()}")
+        elif line.startswith("【应对策略】"):
+            st.warning(line.replace("【应对策略】", "").strip())
+        else:
+            st.markdown(line)
+
+
+def _trial_plain_text(script: dict) -> str:
+    """把五段脚本合成可复制纯文本。"""
+    parts = []
+    for key, label in lesson_svc.TRIAL_SECTIONS:
+        parts.append(f"【{label}】\n{script.get(key, '')}")
+    return "\n\n".join(parts)
+
+
+def _render_trial_result(lesson_id: int):
+    """展示试讲脚本、导出、复制、调参和重生成入口。"""
+    script = st.session_state.get("trial_script")
+    settings = st.session_state.get("trial_settings", {})
+    if not script:
+        return
+    with SessionLocal() as session:
+        lesson = session.get(LessonPlan, int(lesson_id))
+        if lesson is None:
+            st.session_state.pop("trial_script", None)
+            return
+        plan = lesson_svc.load_plan(lesson)
+
+        st.divider()
+        st.markdown("**🎭 AI 试讲脚本**")
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("📄 导出 Word", key="trial_export_word"):
+            data = lesson_svc.export_trial_word(
+                lesson, plan, script, settings)
+            st.download_button(
+                "⬇️ 下载 Word", data,
+                file_name=f"AI试讲-{lesson.title}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                key="dl_trial_word")
+        if b2.button("📋 复制脚本", key="trial_copy"):
+            plain = _trial_plain_text(script)
+            import json as _json
+            st.components.v1.html(
+                "<script>(async()=>{try{await parent.navigator.clipboard"
+                f".writeText({_json.dumps(plain)});}}catch(e){{}}</script>",
+                height=0)
+            st.toast("已尝试复制；浏览器拦截时可使用下方备用文本。")
+        if b3.button("⚙️ 调整参数", key="trial_adjust"):
+            st.session_state["trial_dialog_id"] = int(lesson_id)
+            st.rerun()
+        if b4.button("🔄 重新生成", key="trial_regenerate"):
+            try:
+                new_script = _run_trial_lecture(lesson_id, settings)
+            except Exception as exc:
+                st.error(f"重新生成失败：{exc}")
+            else:
+                st.session_state["trial_script"] = new_script
+                st.toast("试讲脚本已重新生成。")
+                st.rerun()
+
+        with st.expander("复制受阻时使用这里"):
+            st.text_area("试讲纯文本", value=_trial_plain_text(script),
+                         key="trial_copy_fallback", height=180)
+        for key, label in lesson_svc.TRIAL_SECTIONS:
+            with st.expander(label):
+                _render_trial_lines(script.get(key, ""))
+
 def _edit_lesson():
     """分模块在线编辑当前教案：保存/导出都更新同一条（草稿）记录。"""
     plan = st.session_state["lp_plan"]
     meta = st.session_state.get("lp_meta", {})
+    _trial_lesson_id = st.session_state.get("trial_for_plan_id")
+    if _trial_lesson_id and _trial_lesson_id != meta.get("plan_id"):
+        for key in ("trial_script", "trial_settings", "trial_for_plan_id"):
+            st.session_state.pop(key, None)
 
     if st.session_state.pop("lp_draft_notice", False):
         st.info("教案已自动保存为草稿；编辑后点“💾 保存教案”更新，标题可自行修改。")
@@ -1284,8 +1412,9 @@ def _edit_lesson():
             st.session_state.pop(k, None)
         st.rerun()
 
-    # v1.9.0：根据当前教案生成配套作业（写入 lesson_plan_id）。
-    if st.button("📝 根据教案生成作业", key="lesson_make_hw"):
+    # v1.9.0：根据当前教案生成配套作业；v1.9.1 增加 AI 试讲。
+    _action_hw, _action_trial = st.columns(2)
+    if _action_hw.button("📝 根据教案生成作业", key="lesson_make_hw"):
         _lesson_id = meta.get("plan_id")
         if not _lesson_id:
             st.warning("请先保存教案，再生成配套作业。")
@@ -1301,6 +1430,18 @@ def _edit_lesson():
                            hw_open_id=_new_hw_id)
             except ValueError as _exc:
                 st.warning(str(_exc))
+    if _action_trial.button("🎭 AI试讲", key="lesson_trial"):
+        _lesson_id = meta.get("plan_id")
+        if not _lesson_id:
+            st.warning("请先保存教案，再进行 AI 试讲。")
+        else:
+            st.session_state["trial_dialog_id"] = int(_lesson_id)
+            st.rerun()
+
+    if st.session_state.get("trial_for_plan_id") == meta.get("plan_id"):
+        _render_trial_result(meta.get("plan_id"))
+    if st.session_state.get("trial_dialog_id") == meta.get("plan_id"):
+        _trial_settings_dialog(int(meta["plan_id"]))
 
     # v1.8.1：继续补充的确认区
     if st.session_state.get("lesson_continue_mode"):
@@ -1360,6 +1501,7 @@ def _saved_lessons():
                         'chapter': lesson.chapter or '',
                         'source': lesson.textbook_source,
                         'subject': lesson_svc.plan_subject(lesson),
+                        'plan_id': lesson.id,
                     }
                     st.rerun()
                 if c3.button("导出 Word", key=f"word_{lesson.id}"):
@@ -2070,7 +2212,8 @@ def _question_filters():
             st.info("题库里还没有符合条件的题。可到“AI 出题”生成，或用下方入口导入。")
             return
 
-        table_data = qs.bank_table_rows(questions)
+        table_data = qs.bank_table_rows(
+            questions, qs.variant_counts(session))
         try:
             response = AgGrid(
                 pd.DataFrame(table_data),
@@ -2193,7 +2336,7 @@ def _question_filters():
 
         # 批量操作按钮（表格下方）
         pending_count = len([q for q in questions if q.status == "pending"])
-        op1, op2, op3, op4 = st.columns([1, 1, 1, 2])
+        op1, op2, op3, op4, op5 = st.columns([1, 1, 1, 1, 1.5])
         if op1.button("✅ 审核所选", type="primary", key="bank_batch_approve_bottom"):
             if selected_ids:
                 n = qs.approve_questions(session, selected_ids)
@@ -2215,8 +2358,14 @@ def _question_filters():
                 st.rerun()
             else:
                 st.warning("请先在表格中勾选题目。")
+        if op4.button("🔄 批量变式", key="bank_batch_variant_bottom"):
+            if selected_ids:
+                st.session_state["variant_batch_parent_ids"] = list(selected_ids)
+                st.rerun()
+            else:
+                st.warning("请先在表格中勾选题目。")
         if pending_count > 0:
-            op4.caption(f"当前有 {pending_count} 道待审核，勾选后点对应按钮")
+            op5.caption(f"当前有 {pending_count} 道待审核，勾选后点对应按钮")
 
         # 批量删除二次确认
         batch_delete_ids = st.session_state.get("bank_batch_delete_ids", [])
@@ -2244,6 +2393,11 @@ def _question_filters():
                 if dc2.button("取消", key="cancel_batch_delete"):
                     st.session_state.pop("bank_batch_delete_ids", None)
                     st.rerun()
+
+        _render_variant_preview(session)
+        _batch_variant_ids = st.session_state.get("variant_batch_parent_ids")
+        if _batch_variant_ids:
+            _variant_settings_dialog(_batch_variant_ids)
 
         clicked = qs.clicked_question_id(returned_rows)
         picked_id = clicked or st.session_state.get("bank_picked_id")
@@ -2274,15 +2428,165 @@ def _question_filters():
             st.session_state["bank_picked_id"] = picked_q.id
             _question_detail(session, picked_q)
 
+
+# ---------------------------------------------------------------------------
+# v1.9.1：变式设置弹窗和预览
+# ---------------------------------------------------------------------------
+
+
+@st.dialog("🔄 题目变式设置")
+def _variant_settings_dialog(parent_ids: list[int]):
+    """选择变式类型、数量和难度调整；确认前只生成预览，不写数据库。"""
+    st.caption(f"将为 {len(parent_ids)} 道题生成变式。")
+    st.multiselect(
+        "变式类型（可多选）",
+        list(qs.VARIANT_TYPE_LABELS.values()),
+        key="variant_types")
+    st.number_input("每种变式生成数量", min_value=1, max_value=3, value=1,
+                    key="variant_count")
+    st.radio("难度调整（仅难度变式有效）",
+             ["降低", "保持", "提高"], index=1, horizontal=True,
+             key="variant_difficulty")
+    c1, c2 = st.columns(2)
+    if c1.button("🔄 生成变式", type="primary", key="variant_start"):
+        raw_types = st.session_state["variant_types"]
+        if not raw_types:
+            st.warning("请至少选择一种变式类型。")
+            return
+        adjust_map = {"降低": "lower", "保持": "keep", "提高": "higher"}
+        groups, failures = [], []
+        for parent_id in parent_ids:
+            with SessionLocal() as gen_session:
+                parent = gen_session.get(Question, int(parent_id))
+                if parent is None:
+                    failures.append(f"#{parent_id}：原题不存在")
+                    continue
+                try:
+                    variants = qs.generate_variants(
+                        parent, raw_types,
+                        st.session_state["variant_count"],
+                        adjust_map[st.session_state["variant_difficulty"]])
+                except Exception as exc:
+                    failures.append(f"#{parent_id}：{exc}")
+                else:
+                    groups.append({
+                        "parent_id": parent.id,
+                        "parent_label": f"#{parent.id} {parent.content[:30]}",
+                        "variants": variants,
+                    })
+        if not groups:
+            st.error("所有题目都未生成有效变式。")
+            with st.expander("失败详情"):
+                for item in failures:
+                    st.caption(item)
+            return
+        st.session_state["variant_groups"] = groups
+        if failures:
+            st.session_state["variant_failures"] = failures
+        for key in ("variant_dialog_parent_id", "variant_batch_parent_ids"):
+            st.session_state.pop(key, None)
+        st.rerun()
+    if c2.button("取消", key="variant_dialog_cancel"):
+        for key in ("variant_dialog_parent_id", "variant_batch_parent_ids"):
+            st.session_state.pop(key, None)
+        st.rerun()
+
+
+def _variant_pick_key(parent_id, temp_id):
+    return f"variant_pick_{parent_id}_{temp_id}"
+
+
+def _variant_select_all_callback():
+    """全选/取消全选：只在点击复选框时批量改勾选状态。"""
+    value = bool(st.session_state["variant_select_all"])
+    for group in st.session_state.get("variant_groups", []):
+        for variant in group["variants"]:
+            st.session_state[_variant_pick_key(
+                group["parent_id"], variant["temp_id"])] = value
+
+
+def _render_variant_card(group: dict, variant: dict):
+    """渲染一道变式预览卡片。"""
+    label = qs.VARIANT_TYPE_LABELS[variant["variant_type"]]
+    color = {"number": "#1f77b4", "context": "#2ca02c",
+             "difficulty": "#ff7f0e"}[variant["variant_type"]]
+    with st.container(border=True):
+        cc1, cc2 = st.columns([0.5, 5])
+        cc1.checkbox("选择", key=_variant_pick_key(
+            group["parent_id"], variant["temp_id"]),
+            label_visibility="collapsed")
+        cc2.markdown(
+            f'<span style="color:{color};font-weight:600">● {label}</span>'
+            f'　{TYPE_LABELS[variant["question_type"]]}　'
+            f'{DIFF_LABELS[variant["difficulty"]]}',
+            unsafe_allow_html=True)
+        st.markdown(variant["content"])
+        with st.expander("答案、解析和知识点"):
+            st.markdown(f"**答案：** {variant['answer']}")
+            if variant.get("analysis"):
+                st.markdown(f"**解析：** {variant['analysis']}")
+            try:
+                kps = json.loads(variant["knowledge_points"])
+            except json.JSONDecodeError:
+                kps = []
+            st.caption("知识点：" + ("、".join(kps) if kps else "未标注"))
+
+
+def _render_variant_preview(session):
+    """渲染变式预览；勾选后可统一保存为待审核题。"""
+    failures = st.session_state.pop("variant_failures", [])
+    groups = st.session_state.get("variant_groups")
+    if failures:
+        st.warning("部分题目未生成变式，详情见下方。")
+        with st.expander("部分失败详情"):
+            for item in failures:
+                st.caption(item)
+    if not groups:
+        return
+    st.divider()
+    st.markdown("**🔄 变式题预览**")
+    st.checkbox("全选当前变式", key="variant_select_all",
+                on_change=_variant_select_all_callback)
+    total = sum(len(group["variants"]) for group in groups)
+    st.caption(f"共 {total} 道变式；勾选后点确认入库。")
+    for group in groups:
+        st.caption(group["parent_label"])
+        for variant in group["variants"]:
+            _render_variant_card(group, variant)
+    if st.button("✅ 确认入库", type="primary", key="variant_save"):
+        saved_total = 0
+        with SessionLocal() as save_session:
+            for group in groups:
+                picked = [v for v in group["variants"]
+                          if st.session_state.get(_variant_pick_key(
+                              group["parent_id"], v["temp_id"]))]
+                if picked:
+                    saved_total += len(qs.save_variants(
+                        save_session, picked, group["parent_id"]))
+            save_session.commit()
+        if saved_total == 0:
+            st.warning("请先勾选要入库的变式题。")
+            return
+        for group in groups:
+            for variant in group["variants"]:
+                st.session_state.pop(_variant_pick_key(
+                    group["parent_id"], variant["temp_id"]), None)
+        st.session_state.pop("variant_groups", None)
+        st.session_state.pop("variant_select_all", None)
+        st.toast(f"已入库{saved_total}道变式题")
+        st.rerun()
+
 def _question_detail(session, q):
-    """单题详情：渲染、审核、编辑、删除（删除二次确认）。"""
+    """单题详情：渲染、审核、编辑、变式和删除（删除二次确认）。"""
+    if st.session_state.get("variant_dialog_parent_id") == q.id:
+        _variant_settings_dialog([q.id])
     with st.container(border=True):
         cmeta, capprove = st.columns([5, 1])
         kps = qs.knowledge_points_list(q)
         cmeta.markdown(
             f"**题目 #{q.id}**　{TYPE_LABELS[q.question_type]}　"
             f"{DIFF_LABELS[q.difficulty]}　{STATUS_LABELS[q.status]}　"
-            f"{SOURCE_LABELS.get(q.source, q.source)}　"
+            f"{(f'变式自#{q.parent_question_id}' if q.parent_question_id else SOURCE_LABELS.get(q.source, q.source))}　"
             f"知识点：{'、'.join(kps) if kps else '—'}")
         if q.status == "pending" and capprove.button("✅ 审核通过", key=f"approve_{q.id}"):
             qs.approve_question(session, q.id)
@@ -2301,6 +2605,26 @@ def _question_detail(session, q):
 
         if q.error_points:
             st.markdown(f"**易错点：** {q.error_points}")
+
+        if q.parent_question_id:
+            _origin = session.get(Question, q.parent_question_id)
+            if _origin is not None and st.button(
+                f"↩️ 查看原题 #{q.parent_question_id}",
+                key=f"view_parent_{q.id}"):
+                st.session_state["bank_picked_id"] = _origin.id
+                st.rerun()
+
+        _children = (session.query(Question)
+                     .filter(Question.parent_question_id == q.id)
+                     .order_by(Question.id).all())
+        with st.expander(f"🔗 变式题（{len(_children)}）"):
+            if not _children:
+                st.caption("暂无变式题。")
+            for child in _children:
+                if st.button(f"#{child.id} {child.content[:24]}",
+                             key=f"jump_child_{child.id}"):
+                    st.session_state["bank_picked_id"] = child.id
+                    st.rerun()
 
         with st.expander("✏️ 编辑此题"):
             e_content = st.text_area("题干", value=q.content, height=120,
@@ -2346,7 +2670,11 @@ def _question_detail(session, q):
         else:
             st.caption("暂无修改记录。")
 
-        if st.button("🗑️ 删除此题", key=f"del_q_{q.id}"):
+        _del_col, _variant_col = st.columns(2)
+        if _variant_col.button("🔄 生成变式", key=f"variant_generate_{q.id}"):
+            st.session_state["variant_dialog_parent_id"] = q.id
+            st.rerun()
+        if _del_col.button("🗑️ 删除此题", key=f"del_q_{q.id}"):
             st.session_state["confirm_del_q"] = q.id
         if st.session_state.get("confirm_del_q") == q.id:
             cc1, cc2 = st.columns(2)
