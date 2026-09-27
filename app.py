@@ -404,6 +404,12 @@ if st.sidebar.button("📅 教学日历", key="nav_calendar",
     st.session_state["app_top_page"] = "📅 教学日历"
     st.rerun()
 
+# 直接按钮：数据看板
+if st.sidebar.button("📊 数据看板", key="nav_databoard",
+                      use_container_width=True):
+    st.session_state["app_top_page"] = "📊 数据看板"
+    st.rerun()
+
 # 折叠组：备课
 with st.sidebar.expander("📚 备课", expanded=(top_page == "📚 备课")):
     lesson_subs = ["资料管理", "📚 RAG知识库", "AI 备课", "AI 出题", "题库管理", "PPT 生成"]
@@ -442,12 +448,6 @@ with st.sidebar.expander("📊 学情", expanded=(top_page == "📊 学情")):
 
     st.radio("学情子功能", analysis_subs, key="analysis_tab",
              label_visibility="collapsed", on_change=_on_analysis_sub)
-
-# 直接按钮：数据看板
-if st.sidebar.button("📊 数据看板", key="nav_databoard",
-                      use_container_width=True):
-    st.session_state["app_top_page"] = "📊 数据看板"
-    st.rerun()
 
 # 直接按钮：设置
 if st.sidebar.button("⚙️ 设置", key="nav_settings",
