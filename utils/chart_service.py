@@ -38,47 +38,66 @@ def score_box(rows, score_key: str = "total",
     return fig
 
 
-def ability_radar(rows, subjects) -> go.Figure:
+def ability_radar(rows, subjects, full_scores=None) -> go.Figure:
     """多学科能力雷达图。
 
-    rows：[{学科: 得分率(0-1或0-100)}]，多条线对比多个学生/班级；
-    subjects：参与对比的学科名（雷达轴）。
+    rows：[{学科: 原始分数}]，多条线对比多个学生/班级；
+    subjects：参与对比的学科名（雷达轴）；
+    full_scores：{学科: 满分}，用于将原始分数转为得分率；缺省按100分制。
     """
+    # 各科满分默认值（初中/高中常见满分）
+    DEFAULT_FULL = {"语文": 150, "数学": 150, "英语": 150,
+                    "物理": 100, "化学": 100, "生物": 100,
+                    "政治": 100, "历史": 100, "地理": 100}
+    full_scores = full_scores or DEFAULT_FULL
     fig = go.Figure()
+    all_rates = []
     for i, row in enumerate(rows):
-        values = []
+        rates = []
+        raw_scores = []
         for s in subjects:
             v = row.get(s)
             if v is None:
-                values.append(None)
+                rates.append(None)
+                raw_scores.append(None)
             else:
-                values.append(v * 100 if v <= 1 else v)
+                full = full_scores.get(s, 100)
+                rate = (v / full * 100) if full > 0 else 0
+                rates.append(min(rate, 100))  # 得分率不超过100%
+                raw_scores.append(v)
+                if rate is not None:
+                    all_rates.append(rate)
         name = row.get("name") or f"对象{i + 1}"
         # 闭合雷达图：首尾相连
-        r_vals = list(values) + [values[0]] if values else values
+        r_vals = list(rates) + [rates[0]] if rates else rates
         theta_vals = list(subjects) + [subjects[0]] if subjects else []
-        # 自定义悬停模板：显示学科、分数、得分率
+        # 自定义悬停模板：显示学科、原始分、满分、得分率
         hover_texts = []
-        for s, v in zip(subjects, values):
-            if v is None:
+        for s, raw, rate in zip(subjects, raw_scores, rates):
+            if raw is None:
                 hover_texts.append(f"{s}：无数据")
             else:
-                hover_texts.append(f"{s}：{v:.1f}分（{v:.0f}%）")
+                full = full_scores.get(s, 100)
+                hover_texts.append(f"{s}：{raw:.1f}/{full}分（{rate:.0f}%）")
         hover_texts.append(hover_texts[0] if hover_texts else "")
         fig.add_trace(go.Scatterpolar(
             r=r_vals,
             theta=theta_vals,
-            mode="lines+markers",  # 显示连线和连接点
+            mode="lines+markers",
             fill="toself",
             name=str(name),
-            marker=dict(size=8),  # 连接点大小
+            marker=dict(size=8),
             hovertemplate="%{text}<extra>" + str(name) + "</extra>",
             text=hover_texts))
+    # 动态调整径向轴范围
+    max_rate = max(all_rates) if all_rates else 100
+    radial_max = max(100, int(max_rate / 10) * 10 + 10)
     fig.update_layout(
         polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100], title="得分率(%)"),
+            radialaxis=dict(visible=True, range=[0, radial_max],
+                            title="得分率(%)"),
             angularaxis=dict(rotation=90, direction="clockwise")),
-        showlegend=True, title="多学科能力对比", height=420,
+        showlegend=True, title="多学科能力对比（得分率）", height=420,
         margin=dict(l=20, r=20, t=50, b=20))
     return fig
 
