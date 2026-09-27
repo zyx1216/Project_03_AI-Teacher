@@ -50,7 +50,10 @@ def show():
     c1, c2 = st.columns(2)
     c1.plotly_chart(_bands_fig(data["score_bands"]),
                     use_container_width=True)
-    c2.plotly_chart(_heatmap_fig(mastery), use_container_width=True)
+    if mastery.get("students") and mastery.get("knowledge_points"):
+        c2.plotly_chart(_heatmap_fig(mastery), use_container_width=True)
+    else:
+        c2.info("📊 知识点掌握热力图需要作业答题数据\n\n当前暂无学生在线作业答题记录，布置在线作业后可查看。")
 
     c1, c2 = st.columns(2)
     c1.plotly_chart(_ranking_fig(data["ranking"]),

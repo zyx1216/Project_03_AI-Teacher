@@ -154,11 +154,31 @@ def _subject_compare(session, rows, class_names):
 
 
 def _score_bands(rows):
-    """分数段人数分布。"""
+    """分数段人数分布。单科按百分制，总分按实际分数范围动态分段。"""
+    if not rows:
+        return []
+    scores = [r["score"] for r in rows if r.get("score") is not None]
+    if not scores:
+        return []
+    subject = rows[0].get("subject", "总分")
+    # 单科（百分制）用固定分数段
+    if subject != "总分":
+        result = []
+        for label, low, high in SCORE_BANDS:
+            count = sum(1 for s in scores if low <= s < high)
+            result.append({"band": label, "count": count})
+        return result
+    # 总分：按实际范围分成5段
+    min_s, max_s = min(scores), max(scores)
+    if max_s == min_s:
+        return [{"band": f"{int(min_s)}分", "count": len(scores)}]
+    step = (max_s - min_s) / 5
     result = []
-    scores = [r["score"] for r in rows]
-    for label, low, high in SCORE_BANDS:
+    for i in range(5):
+        low = min_s + i * step
+        high = min_s + (i + 1) * step if i < 4 else max_s + 1
         count = sum(1 for s in scores if low <= s < high)
+        label = f"{int(low)}-{int(high)}"
         result.append({"band": label, "count": count})
     return result
 
