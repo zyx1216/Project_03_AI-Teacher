@@ -20,7 +20,6 @@ def _metric_or_dash(value) -> str:
 
 
 def _quick_actions() -> None:
-    st.subheader("快捷入口")
     c1, c2, c3 = st.columns(3)
     if c1.button("📝 新建作业", key="dash_new_homework", use_container_width=True):
         goto_group("📝 学业测评", "作业管理", hw_new_dialog_open=True)
@@ -99,25 +98,78 @@ def _home_schedule(session) -> None:
 
 
 def _alert_block(session) -> None:
-    """首页置顶：智能提醒。空库显示暂无异常。"""
+    """首页置顶：智能提醒（邮箱消息样式，支持单条/批量已读）。"""
     st.subheader("🔔 智能提醒")
     alerts = agent_alert.check_all_alerts(session)
     if not alerts:
         st.info("暂无异常提醒。")
         return
-    for alert in alerts:
+
+    # 工具栏：全选 + 批量已读
+    unread_keys = [a["dedup_key"] for a in alerts
+                   if not agent_alert.is_read(a["dedup_key"])]
+    tool_c1, tool_c2, tool_c3 = st.columns([1, 2, 4])
+    select_all = tool_c1.checkbox(
+        "全选", key="alert_select_all",
+        value=len(unread_keys) == len(alerts) and bool(alerts))
+    if tool_c2.button("✅ 批量已读", key="alert_mark_all_read",
+                      use_container_width=True, disabled=not unread_keys):
+        target_keys = ([a["dedup_key"] for a in alerts] if select_all
+                       else unread_keys)
+        agent_alert.mark_all_read(target_keys)
+        st.toast(f"已标记 {len(target_keys)} 条为已读。")
+        st.rerun()
+    tool_c3.caption(f"共 {len(alerts)} 条，未读 {len(unread_keys)} 条")
+
+    # 消息列表
+    for idx, alert in enumerate(alerts):
+        read = agent_alert.is_read(alert["dedup_key"])
         severe = alert.get("severity") == "severe"
-        holder = st.error if severe else st.warning
-        holder(f"**{alert['title']}**　{alert['content']}")
-        c1, c2, c3 = st.columns([1, 1, 3])
-        if c1.button("去处理", key=f"alert_go_{alert['dedup_key']}",
-                     use_container_width=True):
-            goto_group(alert["route"], alert["sub"], **(alert.get("extra") or {}))
-        if c2.button("✅ 已处理", key=f"alert_done_{alert['dedup_key']}",
-                     use_container_width=True):
-            agent_alert.resolve_alert(alert["dedup_key"])
-            st.toast("该提醒已标记为处理完成。")
-            st.rerun()
+        # 消息卡片
+        with st.container(border=True):
+            row_c1, row_c2 = st.columns([0.5, 9.5])
+            # 未读圆点
+            if not read:
+                row_c1.markdown(
+                    "<span style='color:#ff4b4b;font-size:20px'>●</span>",
+                    unsafe_allow_html=True)
+            else:
+                row_c1.markdown(
+                    "<span style='color:#ccc;font-size:20px'>○</span>",
+                    unsafe_allow_html=True)
+            # 标题和内容
+            title_style = "color:#999" if read else ""
+            row_c2.markdown(
+                f"**<span style='{title_style}'>{alert['title']}</span>**"
+                f"　<span style='color:#888;font-size:12px'>"
+                f"{'🔴 严重' if severe else '🟡 提醒'}</span>")
+            content_style = "color:#aaa" if read else ""
+            row_c2.markdown(
+                f"<span style='{content_style}'>{alert['content']}</span>",
+                unsafe_allow_html=True)
+            # 操作按钮
+            btn_c1, btn_c2, btn_c3 = row_c2.columns([1, 1, 1])
+            if not read:
+                if btn_c1.button("📖 标记已读",
+                                 key=f"alert_read_{alert['dedup_key']}",
+                                 use_container_width=True):
+                    agent_alert.mark_read(alert["dedup_key"])
+                    st.toast("已标记为已读。")
+                    st.rerun()
+            else:
+                btn_c1.caption("已读")
+            if btn_c2.button("→ 去处理",
+                             key=f"alert_go_{alert['dedup_key']}",
+                             use_container_width=True):
+                goto_group(alert["route"], alert["sub"],
+                           **(alert.get("extra") or {}))
+            if btn_c3.button("✅ 已处理",
+                             key=f"alert_done_{alert['dedup_key']}",
+                             use_container_width=True):
+                agent_alert.resolve_alert(alert["dedup_key"])
+                st.toast("该提醒已标记为处理完成。")
+                st.rerun()
+
     # 展示后记时间戳，保证 24 小时内只显示一次。
     agent_alert.mark_displayed(alerts)
 

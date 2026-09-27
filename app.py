@@ -38,8 +38,8 @@ st.set_page_config(
     layout="wide",
 )
 
-TOP_PAGES = ["🏠 首页", "📅 教学日历", "📚 备课",
-             "📝 学业测评", "📊 学情", "📊 数据看板", "⚙️ 设置"]
+TOP_PAGES = ["🏠 首页", "📅 教学日历", "📊 数据看板",
+             "📚 备课", "📝 学业测评", "📊 学情", "⚙️ 设置"]
 
 
 def _query_param_scalar(name: str):

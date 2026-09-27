@@ -85,16 +85,62 @@ def _metric_cards(m):
 
 
 def _class_trend_fig(series):
-    """班级成绩趋势折线图。"""
+    """班级成绩趋势折线图。x轴用"考试名(日期)"区分同名考试。"""
+    from collections import Counter
     fig = go.Figure()
+    # 收集所有考试点，处理同名同日加序号
+    all_points = []
     for class_name, points in series.items():
+        for p in points:
+            all_points.append((p.get("exam_name", ""), p.get("date", "")))
+    # 统计同名同日出现次数
+    name_date_counter = Counter(all_points)
+    seen = {}
+    def make_label(name, date_str):
+        key = (name, date_str)
+        idx = seen.get(key, 0) + 1
+        seen[key] = idx
+        total = name_date_counter.get(key, 1)
+        if date_str:
+            try:
+                short_date = date_str[5:10]  # MM-DD
+            except Exception:
+                short_date = date_str
+            label = f"{name}({short_date})"
+        else:
+            label = name
+        if total > 1:
+            label += f"{'①②③④⑤⑥⑦⑧⑨⑩'[idx-1] if idx <= 10 else idx}"
+        return label
+    for class_name, points in series.items():
+        seen_local = {}
+        x_labels = []
+        for p in points:
+            key = (p.get("exam_name", ""), p.get("date", ""))
+            idx = seen_local.get(key, 0) + 1
+            seen_local[key] = idx
+            total = name_date_counter.get(key, 1)
+            name = p.get("exam_name", "")
+            date_str = p.get("date", "")
+            if date_str:
+                try:
+                    short_date = date_str[5:10]
+                except Exception:
+                    short_date = date_str
+                label = f"{name}({short_date})"
+            else:
+                label = name
+            if total > 1:
+                label += f"{'①②③④⑤⑥⑦⑧⑨⑩'[idx-1] if idx <= 10 else idx}"
+            x_labels.append(label)
         fig.add_trace(go.Scatter(
-            x=[p["exam_name"] for p in points],
+            x=x_labels,
             y=[p["average"] for p in points],
-            mode="lines+markers", name=str(class_name)))
+            mode="lines+markers", name=str(class_name),
+            hovertemplate="%{x}<br>平均分：%{y}<extra></extra>"))
     fig.update_layout(
-        title="班级成绩趋势", xaxis_title="考试", yaxis_title="平均分",
-        height=380)
+        title="班级成绩趋势", xaxis_title="考试（含日期）", yaxis_title="平均分",
+        height=380, xaxis_tickangle=-30)
     return fig
 
 

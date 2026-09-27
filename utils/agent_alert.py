@@ -61,6 +61,7 @@ def default_state() -> dict:
     return {
         "resolved": {},
         "dismissed24": {},
+        "read": {},
         "config": {key: True for key in ALERT_TYPES},
     }
 
@@ -79,7 +80,7 @@ def load_state() -> dict:
     except (json.JSONDecodeError, OSError):
         return default_state()
     state = default_state()
-    for bucket in ("resolved", "dismissed24"):
+    for bucket in ("resolved", "dismissed24", "read"):
         value = data.get(bucket)
         if isinstance(value, dict):
             state[bucket] = {str(k): str(v) for k, v in value.items()}
@@ -160,7 +161,33 @@ def resolve_alert(dedup_key: str) -> None:
     state["resolved"][dedup_key] = datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S")
     state["dismissed24"].pop(dedup_key, None)
+    state["read"].pop(dedup_key, None)
     save_state(state)
+
+
+def mark_read(dedup_key: str) -> None:
+    """标记提醒为已读（仍显示，但样式变灰）。"""
+    state = load_state()
+    state["read"][dedup_key] = datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S")
+    save_state(state)
+
+
+def mark_all_read(alert_keys: list[str]) -> None:
+    """批量标记已读。"""
+    if not alert_keys:
+        return
+    state = load_state()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for key in alert_keys:
+        state["read"][key] = now
+    save_state(state)
+
+
+def is_read(dedup_key: str) -> bool:
+    """判断提醒是否已读。"""
+    state = load_state()
+    return dedup_key in state.get("read", {})
 
 
 def snooze_alert(dedup_key: str) -> None:
