@@ -54,12 +54,30 @@ def ability_radar(rows, subjects) -> go.Figure:
             else:
                 values.append(v * 100 if v <= 1 else v)
         name = row.get("name") or f"对象{i + 1}"
+        # 闭合雷达图：首尾相连
+        r_vals = list(values) + [values[0]] if values else values
+        theta_vals = list(subjects) + [subjects[0]] if subjects else []
+        # 自定义悬停模板：显示学科、分数、得分率
+        hover_texts = []
+        for s, v in zip(subjects, values):
+            if v is None:
+                hover_texts.append(f"{s}：无数据")
+            else:
+                hover_texts.append(f"{s}：{v:.1f}分（{v:.0f}%）")
+        hover_texts.append(hover_texts[0] if hover_texts else "")
         fig.add_trace(go.Scatterpolar(
-            r=list(values) + [values[0]] if values else values,
-            theta=list(subjects) + [subjects[0]],
-            fill="toself", name=str(name)))
+            r=r_vals,
+            theta=theta_vals,
+            mode="lines+markers",  # 显示连线和连接点
+            fill="toself",
+            name=str(name),
+            marker=dict(size=8),  # 连接点大小
+            hovertemplate="%{text}<extra>" + str(name) + "</extra>",
+            text=hover_texts))
     fig.update_layout(
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
+        polar=dict(
+            radialaxis=dict(visible=True, range=[0, 100], title="得分率(%)"),
+            angularaxis=dict(rotation=90, direction="clockwise")),
         showlegend=True, title="多学科能力对比", height=420,
         margin=dict(l=20, r=20, t=50, b=20))
     return fig
