@@ -415,3 +415,51 @@ class GradingLog(Base):
     created_at = Column(DateTime, default=datetime.now, nullable=False,
                         comment="批改时间")
     confirmed_at = Column(DateTime, nullable=True, comment="确认录入时间")
+
+class TeachingProgress(Base):
+    """学期教学进度表：按周记录计划内容、实际内容和状态。"""
+
+    __tablename__ = "teaching_progress"
+    __table_args__ = (
+        UniqueConstraint("subject", "grade", "semester", "week_number",
+                         name="uq_teaching_progress_week"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    subject = Column(String(30), nullable=False, index=True, comment="学科")
+    grade = Column(String(30), nullable=False, index=True, comment="年级")
+    semester = Column(String(50), nullable=False, index=True, comment="学期")
+    week_number = Column(Integer, nullable=False, comment="周次")
+    planned_content = Column(Text, nullable=True, comment="计划教学内容")
+    actual_content = Column(Text, nullable=True, comment="实际教学内容")
+    status = Column(String(10), nullable=False, default="normal",
+                    comment="normal/lag/ahead")
+    note = Column(Text, nullable=True, comment="备注")
+    updated_at = Column(DateTime, default=datetime.now,
+                        onupdate=datetime.now, comment="更新时间")
+
+
+class AgentMemory(Base):
+    """Agent 长期记忆表：保存稳定偏好和长期上下文。"""
+
+    __tablename__ = "agent_memory"
+    __table_args__ = (
+        UniqueConstraint("memory_type", "key", "category",
+                         name="uq_agent_memory_key"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    memory_type = Column(String(30), nullable=False, default="preference",
+                         index=True, comment="记忆类型")
+    key = Column(String(100), nullable=False, index=True, comment="记忆键")
+    value = Column(Text, nullable=False, comment="记忆内容")
+    category = Column(String(50), nullable=False, default="general",
+                      index=True, comment="分类")
+    importance = Column(Integer, nullable=False, default=5,
+                        comment="重要程度 1-10")
+    created_at = Column(DateTime, default=datetime.now, nullable=False,
+                        comment="创建时间")
+    last_used_at = Column(DateTime, default=datetime.now, nullable=False,
+                          comment="最近使用时间")
+    use_count = Column(Integer, nullable=False, default=0,
+                       comment="使用次数")

@@ -37,6 +37,8 @@ BUSINESS_TABLES = [
     "question_edit_logs",   # 题目修改记录
     "lesson_plan_versions", # 教案历史版本
     "grading_logs",         # -> homeworks / students
+    "teaching_progress",    # 教学进度
+    "agent_memory",         # Agent长期记忆
     "homework_answers",     # -> homeworks / students / questions
     "homework_scores",      # -> homeworks / students
     "homework_questions",   # -> homeworks / questions
