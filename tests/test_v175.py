@@ -69,9 +69,9 @@ def test_constants_and_main_tabs(tmp_path):
         "preview", "classroom", "after_class", "review"]
     assert "exam" not in homework_mod._TYPE_KEYS
     radio = next(x for x in at.sidebar.radio if x.key == "homework_tab")
-    # v2.4.0：成绩录入/作业分析并入「作业批改与分析」，历史并入作业管理。
+    # v2.4.0：成绩录入/作业分析并入「✏️ 批改与分析」，历史并入作业管理。
     assert [item for item in radio.options] == [
-        "作业管理", "🤖 智能组卷", "作业批改与分析", "错题本"]
+        "作业管理", "🤖 智能组卷", "✏️ 批改与分析", "错题本"]
 
     next(b for b in at.button if b.label == "➕ 新建作业").click().run()
     assert not any("试卷出题" in b.label for b in at.button)

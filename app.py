@@ -88,8 +88,9 @@ _LEGACY_SUB_MIGRATION = {
     "homework_tab": {
         "📜 历史记录": ("📝 学业测评", "作业管理",
                        {"homework_state_mode": "已完成"}),
-        "成绩录入": ("📝 学业测评", "作业批改与分析", {}),
-        "作业分析": ("📝 学业测评", "作业批改与分析", {}),
+        "成绩录入": ("📝 学业测评", "✏️ 批改与分析", {}),
+        "作业分析": ("📝 学业测评", "✏️ 批改与分析", {}),
+        "作业批改与分析": ("📝 学业测评", "✏️ 批改与分析", {}),
     },
     "analysis_tab": {
         "教学反思": ("💭 教学反思", None, {}),
@@ -516,7 +517,7 @@ with st.sidebar.expander("📚 备课", expanded=(top_page == "📚 备课")):
 with st.sidebar.expander("📝 学业测评",
                          expanded=(top_page == "📝 学业测评")):
     hw_subs = ["作业管理", "🤖 智能组卷",
-               "作业批改与分析", "错题本"]
+               "✏️ 批改与分析", "错题本"]
     if st.session_state.get("homework_tab") not in hw_subs:
         st.session_state["homework_tab"] = "作业管理"
 
@@ -615,7 +616,7 @@ def _render_current_page() -> None:
             homework.tab_manage()
         elif sub == "🤖 智能组卷":
             homework.tab_smart_compose()
-        elif sub == "作业批改与分析":
+        elif sub == "✏️ 批改与分析":
             homework.tab_grading_analysis()
         else:
             homework.tab_wrong_book()

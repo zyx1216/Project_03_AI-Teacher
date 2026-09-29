@@ -285,8 +285,8 @@ def test_app_homework_analysis_and_dashboard(tmp_path):
     at.session_state["app_top_page"] = "📝 学业测评"
     at.run()
     radio = next(x for x in at.sidebar.radio if x.key == "homework_tab")
-    # v2.4.0：作业分析并入「作业批改与分析」。
-    radio.set_value("作业批改与分析").run()
+    # v2.4.0：作业分析并入「✏️ 批改与分析」。
+    radio.set_value("✏️ 批改与分析").run()
     assert not at.exception, [str(x) for x in at.exception]
 
     goto_top(at, "🏠 首页")

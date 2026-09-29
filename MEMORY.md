@@ -2,6 +2,16 @@
 
 > 项目长期记忆：架构决策、设计取舍、踩过的坑、我的纠正、重要外部资源。
 > 规则：不记密钥/密码/Token（只记"密钥放在哪里"）；代码里一眼能看出来的东西不抄；最新记录置顶。
+## v2.4.1（试卷批改与分析快速入口优化）新增
+- 架构决策（2026-09-29）：
+  - **本版只加入口/改名/筛选，不改业务逻辑、分析算法、服务层**。
+  - **exams 表只加可空列 homework_id**（新库 create_all、旧库走 db.py 待补列）；不新建迁移文件。Exam 表**没有 source 列**，“来自智能组卷”由 homework_id 非空判定，别再去找 source 字段。
+  - **试卷↔考试 get-or-create**：`exam_service.get_or_create_exam_for_homework(session, homework)` 按 homework_id 幂等，重跑不重复建考试。
+  - **批改页选择器上移为两标签共享**：类型筛选固定 key `grading_type_filter`（全部/📝作业/📄试卷），选择框 key `grading_pick_idx`，按 homework_type=="exam" 区分；预选走 `hw_open_id`、消费后即清。旧的 analyze_pick_idx/analyze_pick_homework_id 已不用。
+  - **list_homeworks 默认 created_desc + id.desc()**：后建记录排在候选首位，断言“预选下标”时要按真实排序，不能想当然按下标=id-1。
+  - **逐题分析** `_exam_question_analysis`：复用 analyze_homework 的 per_question（avg_rate/wrong/order_no），无数据给提示不算假值；内层批改面板自带 tabs，断言标签时用 count 包含而非全等。
+  - 作业查看分析无数据时用 st.info「请先完成批改」；试卷查看分析关联不上考试时不跳转。
+
 ## v2.4.0（功能合并与结构优化）新增
 - 架构决策（2026-09-29）：
   - **本版只搬入口、不改逻辑**：22 子功能 → 13 + 独立「💭教学反思」顶级页；被合并函数一律薄封装为私有 helper（零逻辑改动），不内联重写超大文件。

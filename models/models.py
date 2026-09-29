@@ -69,6 +69,7 @@ class Exam(Base):
     full_scores = Column(Text, nullable=True, comment="各科满分，JSON 字符串，如 {数学:120}")
     remark = Column(Text, nullable=True, comment="备注")
     created_at = Column(DateTime, default=datetime.now, comment="创建时间")
+    homework_id = Column(Integer, nullable=True, comment="关联智能组卷试卷 homework.id")
 
     scores = relationship("Score", back_populates="exam", cascade="all, delete-orphan")
 

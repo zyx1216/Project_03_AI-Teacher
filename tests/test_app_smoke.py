@@ -123,7 +123,7 @@ def test_homework_page_four_tabs_empty_state(tmp_path):
     goto_sub(at, "homework_tab", "作业管理", "📝 学业测评")
     assert not at.exception, [str(e) for e in at.exception]
     radio = next(x for x in at.sidebar.radio if x.key == "homework_tab")
-    assert radio.options == ["作业管理", "🤖 智能组卷", "作业批改与分析", "错题本"]
+    assert radio.options == ["作业管理", "🤖 智能组卷", "✏️ 批改与分析", "错题本"]
     assert any(x.key == "homework_list_subject" for x in at.selectbox)
     assert "还没有符合条件的进行中作业" in " ".join(str(x.value) for x in at.info)
     goto_sub(at, "homework_tab", "错题本", "📝 学业测评")
@@ -224,12 +224,12 @@ def test_homework_page_renders_with_data(tmp_path):
     at = AppTest.from_string(
         _isolated_app_code(db_file, tmp_path / "feature.json"), default_timeout=30)
     at.run()
-    # 成绩录入显示全部学科作业，标签带学科。
-    goto_sub(at, "homework_tab", "成绩录入", "📝 学业测评")
-    homework_pickers = [o for o in at.selectbox if o.label == "选择作业"]
-    assert any(any("[物理]" in str(opt) and "冒烟临时作业" in str(opt)
-                   for opt in o.options)
-               for o in homework_pickers)
+    # v2.4.1：批改页选择器上移，候选标签含学科与作业名。
+    goto_sub(at, "homework_tab", "✏️ 批改与分析", "📝 学业测评")
+    picker = next(o for o in at.selectbox
+                  if o.key == "grading_pick_idx")
+    assert any("[物理]" in str(opt) and "冒烟临时作业" in str(opt)
+               for opt in picker.options)
     # 错题本默认数学；切过去后切物理，显示导出按钮。
     goto_sub(at, "homework_tab", "错题本", "📝 学业测评")
     wrong_subject = next(x for x in at.selectbox if x.key == "wrong_book_subject")
@@ -471,8 +471,9 @@ LEGACY_SUB_ALIASES = {
     "homework_tab": {
         "📜 历史记录": ("📝 学业测评", "作业管理",
                        {"homework_state_mode": "已完成"}),
-        "成绩录入": ("📝 学业测评", "作业批改与分析", {}),
-        "作业分析": ("📝 学业测评", "作业批改与分析", {}),
+        "成绩录入": ("📝 学业测评", "✏️ 批改与分析", {}),
+        "作业分析": ("📝 学业测评", "✏️ 批改与分析", {}),
+        "✏️ 批改与分析": ("📝 学业测评", "✏️ 批改与分析", {}),
     },
     "analysis_tab": {
         "教学反思": ("💭 教学反思", None, {}),

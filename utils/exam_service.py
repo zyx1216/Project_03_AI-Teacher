@@ -70,6 +70,42 @@ def create_exam(session, name: str, exam_date=None, grade: str | None = None,
     return exam
 
 
+def get_or_create_exam_for_homework(session, homework) -> Exam:
+    """按 homework_id 关联智能组卷试卷与考试（幂等，v2.4.1）。
+
+    已存在 Exam.homework_id == homework.id 的考试则直接返回最早一条；
+    否则用试卷的名称/学科/年级/总分新建一条考试。Exam 表无 source 列，
+    “来自智能组卷”由 homework_id 非空来标识。
+    """
+    from datetime import date as _date
+
+    hid = homework.id
+    existing = (session.query(Exam)
+                .filter(Exam.homework_id == hid)
+                .order_by(Exam.id)
+                .first())
+    if existing is not None:
+        return existing
+
+    subject = homework.subject or "数学"
+    total = float(homework.total_score or 0)
+    exam_date = _date.today()
+    exam = Exam(
+        name=homework.name,
+        exam_date=exam_date,
+        grade=homework.grade,
+        term=academic_time.semester_name(exam_date),
+        full_scores=json.dumps({subject: total}, ensure_ascii=False),
+        homework_id=hid,
+    )
+    session.add(exam)
+    session.flush()
+    logger_service.log_operation(
+        session, "关联试卷与考试", "智能组卷", exam.id,
+        {"试卷": homework.name})
+    return exam
+
+
 def update_exam(session, exam_id: int, **fields) -> None:
     allowed = {"name", "exam_date", "grade", "term", "remark"}
     exam = session.get(Exam, exam_id)

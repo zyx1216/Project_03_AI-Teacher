@@ -1189,7 +1189,15 @@ def _exam_analysis_panel():
 
     exam_options = {f"{e.name}（{e.exam_date}）": e.id for e in exams}
     c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-    chosen = c1.selectbox("选择考试", list(exam_options.keys()), key="analysis_exam")
+    # v2.4.1：从智能组卷“查看分析”跳来的预选考试，命中即同步并消费。
+    preset_label = st.session_state.pop("analysis_exam_pick_label", None)
+    if preset_label and preset_label not in exam_options:
+        preset_label = None
+    chosen = c1.selectbox(
+        "选择考试", list(exam_options.keys()),
+        index=(list(exam_options).index(preset_label)
+               if preset_label else 0),
+        key="analysis_exam")
     class_filter = c2.selectbox("班级", ["全部"] + classes, key="analysis_class")
     exam_id = exam_options[chosen]
 

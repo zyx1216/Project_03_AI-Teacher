@@ -83,7 +83,7 @@ def _make_at(tmp_path, db_name):
     ("📚 备课", "题库管理"),
     ("📝 学业测评", "作业管理"),
     ("📝 学业测评", "🤖 智能组卷"),
-    ("📝 学业测评", "作业批改与分析"),
+    ("📝 学业测评", "✏️ 批改与分析"),
     ("📝 学业测评", "错题本"),
     ("📊 学情", "学生管理"),
     ("📊 学情", "成绩管理"),
@@ -137,10 +137,25 @@ def test_homework_state_switch(tmp_path):
 
 
 def test_grading_analysis_two_tabs(tmp_path):
+    # v2.4.1：页面无数据会提前返回；造一份作业后才渲染两标签。
+    db_file = tmp_path / "ga.db"
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models.models import Base
+    from utils import homework_service
+    eng = create_engine(f"sqlite:///{db_file.as_posix()}")
+    Base.metadata.create_all(eng)
+    sess = sessionmaker(bind=eng)()
+    homework_service.create_homework(sess, "批改作业", subject="数学")
+    sess.commit(); eng.dispose()
+
     at = _make_at(tmp_path, "ga.db")
-    goto_sub(at, "homework_tab", "作业批改与分析", "📝 学业测评")
+    goto_sub(at, "homework_tab", "✏️ 批改与分析", "📝 学业测评")
     assert not at.exception, [str(e) for e in at.exception]
-    assert [t.label for t in at.tabs] == ["✏️ 作业批改", "📊 批改分析"]
+    # 外层两标签（内层批改面板还有自己的 tabs，只断言包含且各一个）
+    outer = [t.label for t in at.tabs]
+    assert outer.count("✏️ 作业批改") == 1
+    assert outer.count("📊 批改分析") == 1
 
 
 def test_score_management_three_tabs(tmp_path):

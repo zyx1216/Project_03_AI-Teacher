@@ -236,8 +236,8 @@ def test_history_row_scores_button_jumps_to_analysis(tmp_path):
     assert "history_scores_1" in keys
     # 点击：写入 homework_tab 和 analyze_pick_homework_id
     next(b for b in at.button if b.key == "history_scores_1").click().run()
-    # v2.4.0：作业分析并入「作业批改与分析」。
-    assert at.session_state["homework_tab"] == "作业批改与分析"
+    # v2.4.0：作业分析并入「✏️ 批改与分析」。
+    assert at.session_state["homework_tab"] == "✏️ 批改与分析"
     assert at.session_state["analyze_pick_homework_id"] == 1
 
 
@@ -253,13 +253,14 @@ def test_tab_analysis_selects_by_homework_id(tmp_path):
     eng.dispose()
 
     at = _apptest(db_file, tmp_path)
-    # v2.4.0：到「作业批改与分析」，analyze_pick_idx 在批改分析标签。
-    at.session_state["homework_tab"] = "作业批改与分析"
-    at.session_state["analyze_pick_homework_id"] = 2
+    # v2.4.1：批改页选择器上移，预选改用 hw_open_id，选择框 key=grading_pick_idx。
+    at.session_state["homework_tab"] = "✏️ 批改与分析"
+    at.session_state["hw_open_id"] = 2
     at.run()
-    # analyze_pick_idx 应指向 index=1（作业B）
-    idx_box = next(x for x in at.selectbox if x.key == "analyze_pick_idx")
-    assert idx_box.value == 1
+    # 作业B（id=2）被预选；created_desc + id.desc() 下它排在候选首位。
+    idx_box = next(x for x in at.selectbox if x.key == "grading_pick_idx")
+    assert idx_box.value == 0
+    assert "作业B" in str(idx_box.options[0])
 
 
 def test_class_compare_hidden_with_one_class(tmp_path):
@@ -276,8 +277,8 @@ def test_class_compare_hidden_with_one_class(tmp_path):
     eng.dispose()
 
     at = _apptest(db_file, tmp_path)
-    # v2.4.0：到「作业批改与分析」，多班级对比在批改分析标签。
-    at.session_state["homework_tab"] = "作业批改与分析"
+    # v2.4.0：到「✏️ 批改与分析」，多班级对比在批改分析标签。
+    at.session_state["homework_tab"] = "✏️ 批改与分析"
     at.run()
     # expander 内提示：多个班级有成绩后可对比。
     assert any("多班级对比" in e.label for e in at.expander)
@@ -298,8 +299,8 @@ def test_class_compare_shows_table_when_multi_class(tmp_path):
     eng.dispose()
 
     at = _apptest(db_file, tmp_path)
-    # v2.4.0：到「作业批改与分析」。
-    at.session_state["homework_tab"] = "作业批改与分析"
+    # v2.4.0：到「✏️ 批改与分析」。
+    at.session_state["homework_tab"] = "✏️ 批改与分析"
     at.run()
     # 不报错即视为通过（dataframe 渲染检查需要宽松一些）
     assert not at.exception, [str(e) for e in at.exception]
@@ -350,8 +351,8 @@ def test_score_editor_visible_anytime(tmp_path):
     eng.dispose()
 
     at = _apptest(db_file, tmp_path)
-    # v2.4.0：成绩录入并入「作业批改与分析」的作业批改标签。
-    at.session_state["homework_tab"] = "作业批改与分析"
+    # v2.4.0：成绩录入并入「✏️ 批改与分析」的作业批改标签。
+    at.session_state["homework_tab"] = "✏️ 批改与分析"
     at.run()
     assert not at.exception, [str(e) for e in at.exception]
     # 作业批改内仍含"成绩编辑"。

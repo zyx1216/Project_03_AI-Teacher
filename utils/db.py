@@ -32,6 +32,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 _PENDING_COLUMNS = {
     "exams": [
         ("full_scores", "TEXT"),
+        ("homework_id", "INTEGER"),
     ],
     "homeworks": [
         ("is_template", "BOOLEAN DEFAULT 0"),

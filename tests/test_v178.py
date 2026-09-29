@@ -68,9 +68,9 @@ def test_history_main_tabs_count_six(tmp_path):
     at = _apptest(db_file, tmp_path)
     assert not at.exception, [str(e) for e in at.exception]
     radio = next(x for x in at.sidebar.radio if x.key == "homework_tab")
-    # v2.4.0：成绩录入/作业分析并入「作业批改与分析」，历史并入作业管理。
+    # v2.4.0：成绩录入/作业分析并入「✏️ 批改与分析」，历史并入作业管理。
     assert radio.options == [
-        "作业管理", "🤖 智能组卷", "作业批改与分析", "错题本"]
+        "作业管理", "🤖 智能组卷", "✏️ 批改与分析", "错题本"]
 
 
 def test_history_lists_completed_only_and_orders_by_completed_at(tmp_path):
