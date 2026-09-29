@@ -1,0 +1,697 @@
+# AI教学辅助 · MEMORY.md
+
+> 项目长期记忆：架构决策、设计取舍、踩过的坑、我的纠正、重要外部资源。
+> 规则：不记密钥/密码/Token（只记"密钥放在哪里"）；代码里一眼能看出来的东西不抄；最新记录置顶。
+## v2.4.1（试卷批改与分析快速入口优化）新增
+- 架构决策（2026-09-29）：
+  - **本版只加入口/改名/筛选，不改业务逻辑、分析算法、服务层**。
+  - **exams 表只加可空列 homework_id**（新库 create_all、旧库走 db.py 待补列）；不新建迁移文件。Exam 表**没有 source 列**，“来自智能组卷”由 homework_id 非空判定，别再去找 source 字段。
+  - **试卷↔考试 get-or-create**：`exam_service.get_or_create_exam_for_homework(session, homework)` 按 homework_id 幂等，重跑不重复建考试。
+  - **批改页选择器上移为两标签共享**：类型筛选固定 key `grading_type_filter`（全部/📝作业/📄试卷），选择框 key `grading_pick_idx`，按 homework_type=="exam" 区分；预选走 `hw_open_id`、消费后即清。旧的 analyze_pick_idx/analyze_pick_homework_id 已不用。
+  - **list_homeworks 默认 created_desc + id.desc()**：后建记录排在候选首位，断言“预选下标”时要按真实排序，不能想当然按下标=id-1。
+  - **逐题分析** `_exam_question_analysis`：复用 analyze_homework 的 per_question（avg_rate/wrong/order_no），无数据给提示不算假值；内层批改面板自带 tabs，断言标签时用 count 包含而非全等。
+  - 作业查看分析无数据时用 st.info「请先完成批改」；试卷查看分析关联不上考试时不跳转。
+
+## v2.4.0（功能合并与结构优化）新增
+- 架构决策（2026-09-29）：
+  - **本版只搬入口、不改逻辑**：22 子功能 → 13 + 独立「💭教学反思」顶级页；被合并函数一律薄封装为私有 helper（零逻辑改动），不内联重写超大文件。
+  - **两套成绩模型不混**：作业总分 HomeworkScore（必须先选作业）的导入/录入/编辑+逐题批改全部留在「作业批改与分析」；学情成绩管理只管考试 Score。
+  - **隔离模板坑（重要）**：新增顶级模块（如 modules.reflection）必须同时加进 `_isolated_app_code` 的「模块导入列表」和「SessionLocal 重绑定循环」，否则全文件跑时该模块读到上个测试的旧库（单跑正常）。
+  - **expander 改常驻 tab 的测试影响**：成绩导入并入「成绩管理→成绩录入」后，`_import_expander()` 改为按固定 key（score_upload）定位上传控件，不再按 expander label。
+  - **旧值迁移口径**：升级首启按固定映射迁移旧 radio 值并设内部模式 key（material_view_mode/homework_state_mode）；AppTest 会实例化全部 tab 内容，无需也没有 Tab.select()。
+  - **子功能标签沿用裸名**：沿用现有「资料管理/AI备课/作业管理」等，只保留「🤖 智能组卷」等既有 emoji，最小化旧测试改动。
+## v2.3.1（代码审查与适配修复）新增
+- 架构决策（2026-09-28）：
+  - **本版只修真实 bug，不做增强**：四类归一修复都落在 excel_handler/question_service 的纯函数层，单一接入点；不改 UI、不加依赖、不动表（仍 21 张表）。
+  - **性别归一** normalize_gender：男/男生/M/m/male/1→男，女/女生/F/f/female/0→女，未知→None；学生导入写库时套用。
+  - **科目别名归一** normalize_subject_name：Chinese/语 文/语文成绩 等映射到九科；**非标科目（科学、道德与法治）保留原名入库 + 提示一次，不阻断**，但不计入九科分析。
+  - **长表 parse_long_table**：姓名+科目+分数三要素才命中，按（姓名、班级）合并；成绩导入先试长表再走宽表。科目值同样走别名归一。
+  - **难度 normalize_difficulty 扩展**：含「易」（无「难」）→1；★/☆/* 按数量映射、≥3 封顶；旧 基础/中等/拓展、1/2/3 口径不变。
+  - **等级成绩不转换**：优/良/及格不转分数，属增强非本版范围，此类单元格按缺分处理。
+  - **AppTest 空库成绩导入坑**：默认目标「选择已有考试」但无考试会提前 return、score_upload 不渲染；测试需先切「新建考试」。
+## v2.3.0（体验与技术优化）新增
+- 架构决策（2026-09-28）：
+  - **21 张表口径**：新增审计表 operation_logs；备份/清空业务表数量同步为 21。迁移 `migrations/v2.3.0_migration.py` 可重复执行，只补表和索引、不改字段、不删数据。
+  - **七个固定索引名**：ix_students_class_name、ix_students_name、ix_scores_student_id、ix_scores_subject、ix_questions_subject、ix_questions_grade、ix_exams_exam_date。knowledge_points 是 JSON 串不建整串索引。
+  - **新运行时 JSON/目录**：data/onboarding.json（引导状态）、data/shortcut_config.json（快捷键开关）、logs/error_YYYYMMDD.log（错误日志）。
+  - **操作日志只记写操作**：create/update/delete/import/export 记录，查询不记；detail 递归脱敏密码/API Key/Token/私钥。
+  - **撤销栈上限 50**：学生/题目/作业增删改走 record_row_change；题目删除必须走 record(target)，才能快照变式子题链接（__question_child_links__），undo 才恢复父子关系；UI 层不再重复 record 题目删除。
+  - **redo 删除口径**：_redo_row_change 对 delete 要重新按主键删，不能依赖 __after__（删除只有 before）。
+  - **v2.2.0 漏接入已补**：设置页正式调用 _memory_management_panel；首页正式调用 _teaching_progress_block。
+  - **缓存口径**：只读统计 st.cache_data(ttl=300)，只缓存 JSON 安全数据，写入后清缓存；学生/题库分页 20/50/100，分页编辑学生用全量 filtered_ids 避免误删其他页。
+  - **AppTest 坑**：首页 toast 与 onboarding 弹窗同帧会触发框架对 Toast 占位 children 的解析缺陷（真实 Streamlit 正常）；旧 AppTest 夹具默认写 skipped 的 onboarding.json 隔离。
+
+## v2.2.0（Agent能力增强）新增
+- 架构决策（2026-09-28）：
+  - **20 张表口径**：新增 teaching_progress、agent_memory；备份/清空业务表数量同步为 20，迁移脚本可重复执行。
+  - **长期记忆允许列表**：只有默认难度、教案风格、作业风格、默认题量、常用题型、高风险确认等稳定偏好可自动补参数；其它记忆仅供回答组织参考。
+  - **敏感内容不入库**：密码、Token、API Key、密钥、私钥等不写入 agent_memory。
+  - **教学进度按周次对比**：根据教师录入的实际内容和当前学期周判断 normal/lag/ahead，不用文本相似度猜是否完成。
+  - **工具调用必须走服务层**：工具不直接拼 SQL、不绕过校验；删除/覆盖/批量写入为高风险，必须确认。
+  - **Function Calling 降级**：模型支持则原生 tools；不支持则用结构化 JSON 工具协议。
+  - complex 自主规划仍先预览不落库；多Agent模式不绕过确认。
+
+## v2.1.0（功能深化批次2）新增
+- 架构决策（2026-09-28）：
+  - **课堂实录不做录音转写**：只接受粘贴文本或 TXT/MD 逐字稿，运行时历史落 `data/class_records.json`。
+  - **个性化作业只限单学生**：薄弱点只来自 HomeworkAnswer 真实逐题数据，不按普通考试总分拆分；不批量生成全班作业。
+  - **资源包口径**：复用 Textbook 和原始文件存储，ZIP 内用 manifest.json 记录元数据；按学科+名称+文件哈希去重，不新增 teaching_resources 表。
+  - **完成度分析不统计作答耗时**：现有数据只有提交时间，没有开始作答时间；题目难度只按正确率做当次分析，不改 Question.difficulty。
+  - **主观题批改必须教师确认**：AI 异常或非法 JSON 时不编造分数，确认后写 GradingLog。
+  - **板书保存回原教案**：通过 save_plan 写版本历史，PNG 使用 Pillow 和微软雅黑本地生成。
+
+## v2.0.0（功能深化批次1）新增
+- 架构决策（2026-09-28）：
+  - **本版是补缺，不是重做**：错题本、章节多选、版本留存等已有能力不重复实现。
+  - **质量分和相似度不落库**：质量分按规则或 LLM 当次计算；相似度＝知识点 Jaccard + 题干字符相似度。
+  - **入库前查重口径**：AI 出题、外部导入、历年真题默认“疑似重复即拦截”；教师勾选强制保存后才写入。
+  - **分层作业落库**：按最近一次考试 A 前20%、B 中60%、C 后20%；三份作业难度分别为 3/2/1，复用 create_homework/auto_compose。
+  - **家校报告**：只整合真实考试成绩和 HomeworkAnswer 逐题正确率；数据不足明确提示。
+  - 普通考试总分/分科分仍不拆知识点。
+
+## v1.9.9（趋势图样式优化）新增
+- 架构决策（2026-09-27）：
+  - **统一趋势工具**：chart_service.trend_header/build_trend_figure。x 轴隐藏文字标签（保留轴和网格），线宽 3、点 10，整图全宽。
+  - **悬停口径**：hovermode="x unified"，考试名/日期/满分等公共信息在头部只出现一次，每条线只占一行（原始分+得分率），避免 unified 又每线 7 行导致要滚动。
+  - **类目对齐**：多线以“考试名+日期”（班级趋势内部用 exam_id）统一类目对齐，不用裸序号——某班缺考时缺点断开、不错位；显示编号在当前范围内从 1。
+  - **总分图恒原始分**：班级/学生的总分图不参与得分率切换（各次科目组合/总分可能不同）；单科默认得分率、可切回。
+  - 学生趋势柱状模式只同步隐藏 x 标签/420/全宽，不改 Bar 结构。
+  - **初中语数英默认满分 150→120**（full_score_service，高中 150、其余 100）；考试 full_scores 配置仍最优先，只影响没单独配置的初中旧数据。
+  - 跨班对比、环比同比函数无调用入口（死代码），本版不接入。
+  - 固定 key：databoard_trend_score_mode、trend_class_score_mode、trend_student_score_mode（前两个显示选择器沿用旧 key）。
+
+## v1.9.8（分数图表满分适配）新增
+- 架构决策（2026-09-27）：
+  - **统一满分口径**：新增 utils/full_score_service.py。考试满分优先级 Exam.full_scores 合法项 > 年级默认（小学语数英100，初高中语数英150、其余100）> 100；损坏/零值/缺字段该项回退不报错。
+  - **作业满分来源**：HomeworkQuestion.score 之和 > Homework.total_score > 100；题目分值合计与登记总分不一致时页面只提示，不回写题库。
+  - **趋势切换口径**：班级 trend_class_score_mode、学生 trend_student_score_mode、看板 databoard_trend_score_mode；单科默认得分率（看板班级趋势默认原始分），总分图恒为原始分（科目组合/总分可能不同）。
+  - **五段 rate_bands**：不及格/及格/中等/良好/优秀（优秀上界无限大，>100 也归优秀）；旧三段自定义 bands 保留并存。及格率/优秀率指标仍走可配置 60%/85%。
+  - 普通考试总分/分科分不拆知识点；知识点仍只用逐题 HomeworkAnswer。
+  - **踩到的坑（测试隔离）**：_isolated_app_code 的 SessionLocal 替换/预导入列表必须含 modules.databoard——它一旦被早先 AppTest 提前导入，就会带着真实 SessionLocal，后续脚本复用该模块导致看板读到空库（单测过、全量挂）。规律：新增用 `from utils.db import SessionLocal` 的模块，都要同步加进隔离模板的 import 和替换循环两处。
+  - 固定 key：databoard_trend_score_mode、trend_class_score_mode、trend_student_score_mode。
+
+## v1.9.7（数据看板 + 智能批改 + API接口）新增
+- 架构决策（2026-09-27）：
+  - **看板口径**：`databoard_service` 只做确定性聚合（成绩来自普通考试 Score 表），知识点热力图复用 build_mastery，不重算；新顶级页位置固定在学情后、设置前。
+  - **批改识别口径**：本地 RapidOCR（新增 ocr_service.ocr_image 直接喂图片字节）+ 文本 LLM，不做多模态。LLM 只把 OCR 文字结构化成“题号→学生答案”。
+  - **批改判分**：客观题（choice/fill/judge）服务层对照标准答案自动判；填空标准答案支持 `；;、/` 多写法命中；主观题（solution）LLM 给分，默认需教师确认。
+  - **grade_homework_image 不落库**；confirm_grading 才写 HomeworkAnswer + HomeworkScore + confirmed 的 GradingLog，重复批改同主键更新。
+  - **API 复用服务层**：api/main 经 utils.db.SessionLocal（monkeypatch 友好）调 student/exam/agent 服务，不写重复业务；除 health 外都过 require_key（X-API-Key，401）。
+  - **API Key 存储**：独立于 AI key，放 data/api_keys.json，SHA-256 存摘要，明文只在生成时显示一次；可后续换 JWT。
+  - 踩到的坑（均为 commit 后对象 expire 的 DetachedInstanceError）：①grading 会话块外用 hw.name → 会话内取 homework_name；②api add_score 块外访问 exam.id → 块内取 exam_id。规律：`with SessionLocal()` 退出后不要碰 ORM 对象，提前取标量。
+  - 固定 key：nav_databoard、databoard_*、grade_hw_{id}、grading_student/mode/files/start/confirm/retry_{id}、api_create_key、api_start_server。
+  - AppTest 隔离 _isolated_app_code 新增 api_keys_file 参数，必须接管 api_keys.json。
+- 全量最终结果：849 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+## v1.9.6（RAG知识库 + 多Agent协作）新增
+- 架构决策（2026-09-27）：
+  - **RAG 复用 ChromaDB，不另建索引**：检索/存储直接走 `utils/vector_store.py`（云端 embedding→本地 ONNX→关键词三级降级）和现有分块；`data/rag_config.json` 只存 top_k 等少量设置，不做 JSON 向量文件。
+  - RAG 编排口径在 `utils/rag_service.py`：多资料逐库 search → 向量按相似度归并在前、关键词兜底在后 → format_context 拼参考 → LLM“只依据资料、答不出明说”。
+  - **置信度确定性规则，不靠模型自报**：高=top sim≥0.75 且来源≥2；中=sim≥0.55 或多条向量命中；低=仅关键词/无命中。
+  - 意图加 `RAG_QUERY`（INTENTS 5→6 类）；AI 助手“从课本里找…”走 `_do_rag_query`，按学科选资料、章节线索收窄。
+  - **多Agent 是角色封装、真实落库走服务层**：Lesson/Question/Analysis Agent 分别调 `_do_prepare`、`create_homework+auto_compose`、`analyze_exam`，不让 LLM 直接产已执行结果。
+  - Coordinator 固化 full_lesson/exam_improve/layered_teaching 三场景；单 Agent 失败保留前序与数据、failed_index 指到失败步，start_index 实现重试/跳过；超时靠 LLM 超时（≤60s），不做线程强杀。
+  - **complex 仍先确认**：多Agent模式不绕过 v1.9.5 的计划预览；`app._execute_agent_plan` 按开关分流，结果 `via_multi_agent`，UI 按 Agent 展开（ma_reexec_i/ma_skip_i）。
+  - 多Agent日志落 `data/multi_agent_logs/{时间戳}.json`（任务/场景/各Agent摘要耗时/总耗时）。
+  - 踩到的坑：①`with SessionLocal()` 退出后 ORM 对象 expire，块外访问 m.id 报 DetachedInstanceError——multiselect 值本就是 id，直接用；②重生成后相同章节的来源按钮 key 撞车——key 加问答序号；③`_rag_index_stats` 调用处传 id、函数内当对象用，统一成传 textbook_id 内部 get。
+  - 固定 key：multi_agent_mode、rag_material_pick、rag_question_input、rag_chat、rag_ask_btn/rag_regen_btn/rag_clear_btn。
+  - AppTest 隔离 _isolated_app_code 新增 rag_config_file/multi_agent_log_dir 两参数，必须接管，否则读真实 data/。
+- 全量最终结果：829 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+## v1.9.5（自主规划 + 主动提醒 + 教学建议Agent）新增
+- 架构决策（2026-09-27）：
+  - **complex 预览不落库**：识别为 complex 的模糊复合指令，本轮只写 `st.session_state["agent_plan_preview"]` 渲染步骤清单，不调业务服务、不产生数据；点确认才由 execute_plan 执行。确认/跳过/取消/失败重试全靠 start_index 串。
+  - 复杂度四级：simple 查询 / single 单步 / multi_step 现有固定复合 / complex 自主规划。注意“备这节课/备一节课”要用正则 `备.{0,3}课` 才算备课动作，单查“备课”字样会漏判。
+  - 四类增强计划：full_lesson_prep / exam_analysis_with_plan / review_paper_generation / student_intervention；plan_kind_of 对“分析XX并安排专项”要归 student_intervention。
+  - **提醒去重与开关**：提醒落 `data/agent_alerts.json`（不进 17 表），桶 resolved/dismissed24/config；同一 key 24 小时内只显示一次，resolved 永不再显示；5 类各自独立开关。
+  - 提醒口径：成绩 3 次严格递减且累计相对降幅 >5%；学生总分降 >20 或班内排名降 >10；提交率 <60% 且 2 天内截止；本周应上课时>已存教案；知识点已审核题 <5。成绩/学生骤降红，其余黄。
+  - **进度落后本周口径**：本周课程表应上 vs 本周已保存教案。周一 weekday=0 必须用 `week_monday.weekday() <= entry.weekday`，严格 `<` 会把周一全天漏掉（dashboard_service 本周进度同口径，一并修了）。
+  - **建议每周缓存**：本周首次进首页 spinner 自动生成一次，落 `data/agent_suggestions.json`（含 ISO 周标识 week_id），之后读缓存；可 force 重生成。
+  - 建议文案 = 确定性聚合（薄弱点 build_mastery/错误率/提交率/A·B·C 层次/关注名单）+ LLM 组织；AI 不可用或返回非法时走规则模板兜底；数据不足返回固定“需要更多成绩数据”，不编造。
+  - **建议入反思新建方式**：`save_weekly_to_reflection` 新建一条 TeachingReflection（不挂已有反思），再据 measures 经 reflection_service.save_plan 生成改进计划。
+  - 口语路由 run_quick_info：注意的/教学建议/怎么分层/怎么复习；非这些口径返回 None 再走正常意图。
+  - 首页两区块在 st.title+日期 caption 之后、今日概览之前置顶，顺序 提醒→建议。
+  - 固定 key：规划 agent_plan_confirm/agent_plan_cancel/agent_plan_skip/agent_plan_retry/agent_plan_close；建议 advisor_regen/advisor_expand/advisor_save_reflection；提醒按钮 alert_go_*/alert_done_*、开关 alert_switch_*。
+  - AppTest 隔离 _isolated_app_code 新增 agent_alerts_file/agent_suggestions_file 两参数，必须接管，否则读真实 data/。
+  - 普通考试总分不拆分知识点；建议和提醒里的知识点只认真实 HomeworkAnswer。
+- 全量最终结果：811 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+## v1.9.4（上下文记忆 + 多轮修正）新增
+- 架构决策（2026-09-27）：
+  - 上下文落 `data/agent_context.json`（不进库），保留 30 天，过期自动清空；文件缺失回退空、JSON 损坏回退空且不覆盖原文件。
+  - 上下文 grade 始终用界面口径（高一/初二），写入前 sanitize，非法学科/年级不写，空班级/空章节不覆盖已有值。
+  - `fill_intent_params` 只补用户没显式给的字段；明确参数（如上下文数学但说语文）绝不被覆盖。意图 params 新增 class_name。
+  - “重置上下文”“记住我现在教……”是纯本地操作，不建会话也不触发服务层。
+  - 各功能区同步只挂在控件 on_change / 操作成功后，不做全局轮询；同步辅助：lesson_plan._sync_agent_context、homework._sync_context、analysis._sync_analysis_context，异常内部吞掉不影响主流程。
+  - 试卷修正铁律：不直接改原题（可能被别的作业引用），一律克隆新题（source="AI 修正"、status="pending"、年级用 to_display_grade 转界面口径）再 replace_homework_question；删除只删作业关联，题库原题保留；新增题走 auto_compose。
+  - add 分支从 homework_questions() 取题要解包元组（for _link, q in ...），直接 q.id 会 AttributeError——这是本版踩到并修掉的真 bug。
+  - 教案修正原地更新原对象，靠现有 save_plan 版本历史回退，最多 5 版本；分析修正只支持换学科/看趋势/对比上次，不支持的筛选（如只看男生）直接报错不编造。
+  - 撤销修正每结果最多保留 5 步快照；试卷撤销恢复关联和分值但不删新克隆题，教案撤销回退内容，分析撤销恢复上次参数。执行无关新指令清空撤销链。
+  - 历史记录新增 entry_kind/parent_history_id/artifact_type/correction_count；修正历史 allow_duplicate=True，相同文本可连续写入；缺原结果重放修正报“请先重新执行原指令”。
+  - 固定 key：侧边栏 agent_context_edit/agent_context_reset/agent_undo_correction；弹窗 ctx_subject/ctx_grade/ctx_class_name/ctx_chapter/ctx_save。
+  - AppTest 隔离 _isolated_app_code 新增 agent_context_file 参数，必须接管 agent_context.json，否则可能读到真实 data/。
+  - 测试坑：set_value 设成与当前值相同的值不触发 on_change（user_config 落真实用户目录会残留上次选择）；验证回调要先切别的值再切目标值。
+- 全量最终结果：784 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+
+## v1.9.3（教学反思改进闭环）新增
+- 架构决策（2026-09-26）：
+  - 教学反思升级为“反思 → 改进计划 → 验证考试 → 验证报告 → 历史追踪”闭环；改进措施固定为 `measure/method/expected_effect`，`method` 只能是课堂调整、作业优化、个别辅导、其他。
+  - `reflection_plans` 表通过 `reflection_id` 关联教学反思，不新增 ORM relationship；计划状态为 pending/verified/expired。删除反思自动删除计划。
+  - `TeachingReflection.has_plan` 只标记是否有关联计划；保存计划置 1，删除计划置 0，历史数据不批量回填。
+  - 自动验证由服务层计算总分/同学科得分率、及格率、优秀率和共同学生分数变化；AI 只做解释和建议，AI 不可用时走兜底报告。
+  - 知识点变化只认真实 `HomeworkAnswer` 逐题作答；普通考试总分或分科分数不拆分，缺逐题数据时明确写 None/不评估。
+  - 弹窗跨 rerun 由 `plan_dialog_state` 维持，保存或取消后清理；成绩自动验证必须纳入当前事务后再 commit。
+- 全量最终结果：756 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+
+## v1.9.2（现有功能深化批次2）新增
+- 架构决策（2026-09-26）：
+  - 双向细目表按“知识点 × 难度”统计；多知识点题在每个知识点计题数，但难度合计和总题数必须按唯一题目 ID 统计。
+  - 多知识点分值按数量均摊，尾差计入第一个知识点；缺逐题分值时只在页面和导出时等额分摊，不回写题库。
+  - `st.dataframe` 没有单元格点击事件，格子管理统一为“下拉选择 + @st.dialog”；替换题必须同学科、同知识点、同难度、已审核且不在当前作业中。
+  - 知识点趋势只使用逐题作答数据，普通考试总分不拆分；缺失作答记 `None` 并让折线断开。
+  - 学生画像的个人线用彩色，班级平均用灰色虚线；趋势斜率阈值为 ±0.02，少于 3 个有效点显示数据不足。
+- 全量最终结果：735 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+
+## v1.9.1（现有功能深化批次1）新增
+- 架构决策（2026-09-26）：
+  - AI 试讲脚本固定五段：课堂导入、新知讲解、课堂练习、课堂总结、板书设计；脚本只存当前会话，不入库，需要留存时导出 Word。
+  - 试讲设置固定口径：班级层次、试讲时长、学生活跃度；关键提问/学生回答/应对策略分区着色。
+  - 题目变式支持数字、情境、难度三类；变式题继承原题学科、界面年级和知识点，`parent_question_id` 指向原题，状态默认 pending。
+  - 变式类型只在预览中使用，不持久化；知识点按 JSON 数组合并去重，不能逗号拼接。
+  - 删除父题不删除变式：有祖父题改挂祖父题，否则置空父题 ID；撤销删除会恢复原题和原父子链接。
+- 全量最终结果：718 passed / 1 failed；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，与本版无关。
+
+## v1.9.0（功能深化与 Agent 化）新增
+- 架构决策（2026-09-26）：
+  - Agent 动作统一返回 `{status,summary,route,sub,extra}`；LLM 只做意图识别和参数提取（5 类意图），不允许直接返回“已执行”，真正执行走服务层。侧边栏固定 key：`agent_assistant_input/agent_run/agent_history_pick`。
+  - 意图历史落 `data/agent_history.json`（常量 `agent_service.AGENT_HISTORY_PATH`），最近 20 条；缺失自建、损坏回退空列表且不覆盖。
+  - 多步规划取消是协作式（模块标志，步骤之间检查），不强行中断 LLM 网络请求；失败保留已完成数据、从失败步骤重试。
+  - 知识图谱掌握度只用 HomeworkAnswer，不把总分摊到知识点；权重 = 半衰期 `0.5**(days/180)` × 难度权重（1.0/1.3/1.6）；红黄绿阈值 <60/60-80/>80。推荐题只取同学科、已审核题。
+  - 教案作业联动：配套作业写 `lesson_plan_id`（Homework 新补列），章节只约束 AI 补题；AI 备课按钮 `lesson_make_hw`，作业侧 `_render_lesson_origin`。
+  - 撤销/重做只在当前会话、覆盖指定操作；删除级联快照关联表，按原主键恢复；栈≤10、新操作清 redo、切一级页面清栈。
+  - 导出：教案 PDF 走 PyMuPDF Story（嵌入 msyh.ttc），不做 Word 转 PDF；作业 LaTeX 用 ctexart、保留题干已有 `$...$`；分析 PPT 走 python-pptx。
+- 关键坑：PowerShell 的字符串替换多次“看似成功实则未写入/被旧内容覆盖”，app.py 和 analysis.py 的若干改动丢失过一轮；改完必须立即用行号/语法检查核对，再跑测试确认。
+- 全量最终结果：700 passed / 1 failed。唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 仍是基线预存失败，与本版无关。
+## v1.8.3（中低优先级功能完善）新增
+- 架构决策（2026-09-26）：
+  - 数据库从 13 张变为 **16 张**：新增 `lesson_plan_versions`、`question_edit_logs`、`homework_submissions`；`Homework` 另通过轻量补列新增可空 `submit_code`。
+  - 在线提交链路独立于 `*_tab`：`?code=提交码` 或 `?page=submit` 在主导航前分流到 `modules/submit_page.py`；提交码和二维码由 `homework_submit_service` 生成，选择/判断题自动批改，主观题老师手动打分、写评语。
+  - 教案保存自动写版本，每教案最多保留 5 版；题目单题保存和批量编辑都通过 `question_edit_logs` 逐字段记录旧值、新值。
+  - 题库批量导入和 AI 补题默认进入待审核，不自动通过；已有能力只补差异，不推倒重做。
+  - AppTest 隔离脚本不能直接替换全局 `backup_service.auto_backup_if_needed`，否则同进程后续服务测试会被污染；统一用环境变量 `MATH_TEACHER_DISABLE_STARTUP_BACKUP=1` 关闭启动备份。
+- 全量最终结果：673 passed / 1 failed。唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 是 v1.8.2 已存在的基线失败，与本版无关。
+
+## v1.8.2（侧边栏折叠导航与学期自定义）新增
+- 架构决策（2026-09-25）：
+  - 侧边栏从「6 项主导航 radio + 主内容区 st.tabs」改为折叠导航：一级路由 `app_top_page`；首页/日历/设置为直接按钮，备课/学业测评/学情为 expander + 组内子 radio。
+  - **三个子 radio 直接复用旧 key** `lesson_plan_tab/homework_tab/analysis_tab`，语义从“主内容区 st.tabs 的 key”变为“侧边栏子 radio 的 key”。这样模块内已有的 `session_state["xxx_tab"]=...` 跳转意图不用改，但实现方式必须变（见下一条）。
+  - **关键坑（推翻计划原假设）**：内容区按钮在子 radio widget 创建后直接写这些 key，会报 `StreamlitWidgetAlreadyInstantiatedError`。所以内容区按钮不能再直接赋值，统一走新增的 `utils/navigation.py::goto_group(group, sub, **extra)`，写一次性 `_pending_app_route/_pending_app_sub/_pending_app_sub_key`，由 app.py 在导航控件创建前消费。
+  - app.py 不再调三个模块的 `show()`，改为按 (top, sub) 直接分发到 `tab_*` 子函数；`show()` 保留不删，但测试不再调用，避免同 run key 冲突。切换子功能只靠 widget key 保持状态，不 pop 任何业务 session_state（lp_plan/multi_gen_*/hw_open_id 等都保留）。
+  - 学期配置落 `data/semester.json`（开学/放假日期，缺失自建、损坏回退不覆盖），不进数据库；周次以开学日所在周一对齐第 1 周，学期周按周一至周五、尾周按放假截断。日历视图切换 key `calendar_view`，月视图格内标“第X周”，学期视图按周用 AgGrid 渲染。
+  - 数据库仍为 13 张表，不改结构、不回填历史。
+- 全量最终结果：659 passed / 1 failed。唯一失败 `test_v164.py::test_lesson_tab_with_material_has_no_exception` 是基线预存失败，与本版无关；v1.7.3 面板用例曾因种子作业是物理、列表默认数学找不到打开按钮，补一次学科切换（先把 `homework_list_subject` 切物理）后通过。
+
+## v1.8.1（高优先级功能优化）新增
+- 架构决策（2026-09-25）：
+  - 侧边栏全局搜索 `search_all()` 是纯逻辑，不依赖 Streamlit；四类 LIKE 的 `\ % _` 必须转义（`_like_value()`），作业排除模板和 `__smart_compose_draft__`。
+  - 搜索四类跳转全部走“一次性 pending key + 在目标控件创建前消费”，不直接改已创建的 radio。落点：题目 `bank_search_keyword`、教案 `pending_load_plan_id`、学生 `student_filter_keyword`、作业 `hw_open_id`。
+  - 关键坑：AppTest 里 `st.tabs(..., key=...)` 的 key 不会自动写进 session_state；靠外部 pending 切 tab 时，show() 必须先主动 `st.session_state[受控key]=目标tab`，否则测试读不到、默认 tab 也不对。
+  - AI 备课重生成/继续靠 `lesson_gen_args`（成功生成时落盘全部入参）；继续补充把“额外要求：…”接到 user_text 末尾。
+  - AI 出题“继续”=同 tasks 追加一轮，`_run_question_tasks()` 只生成不写状态，按 subject 合并进 grouped、累加 rejected、save_question_preview。
+  - 批量编辑口径：Question.difficulty 是整数 1-3；Question.grade 存界面显示名（不转存储）；knowledge_points 是 JSON 数组字符串，追加要解析后合并去重再 `json.dumps(ensure_ascii=False)`，禁止逗号拼接。
+  - 数据库仍为 13 张表，不改结构、不回填历史。
+- v1.8.0 测试 `test_finish_button_triggers_dialog` 本身脆弱：按钮 key 集合里有一个 key=None 的“新建作业”按钮，集合遍历顺序一变，`any(k.startswith(...))` 就对 None 调用而崩。修法是先过滤 None，不是功能回归。
+- 全量 640 passed / 1 failed；唯一失败 `test_v164.py::test_lesson_tab_with_material_has_no_exception`（ValueError: 1 is not in list），stash 到基线 v1.8.0 同样失败，是计划标注的预存失败，与本版无关。
+
+
+## v1.8.0（学业测评功能完善）新增
+- 架构决策（2026-09-25）：
+  - 作业编辑器顶部新增 📝 基本信息 expander（名称/班级/总分/用时/截止/资料/章节/反思）；资料下拉按学科+年级过滤，调用新增 `utils.material_service.list_materials(session, subject=, grade=)`。
+  - 教学反思复用 `Homework.remark`（不新增字段），与分析页 “💾 保存到作业备注” 共用同一字段。
+  - 点 ✅ 完成 同时直接 `mark_homework_completed` + 弹 @st.dialog 「✅ 完成作业（含反思）」；dialog 内填反思后点保存写入 remark。这样保证历史脚本与批量过期逻辑不被打破。
+  - 作业管理行多了 📋 复制 按钮，调用 `duplicate_homework()` 生成 pending 副本。历史行多了 📊 成绩 按钮，点后写 `analyze_pick_homework_id` 跳转作业分析。
+  - `tab_analysis` 选作业改为 `selectbox(range(len(homeworks)), key="analyze_pick_idx", index=default_idx)`；default_idx 首次渲染时同步到 session_state 以适应 AppTest（避免 index 参数被已存在的 widget 覆盖）。外部跳转仅首次生效，用户以后手动选不受影响。
+  - 多班级对比仅在 ≥2 班有成绩时显示，阈值复用现有 `pass_line/excellent_line`。
+  - 错题本顶部增加知识点错题数柱状图，取首知识点归类。
+  - 服务层增加 `homework_service.list_homework_scores_grouped_by_class()`、`homework_score_service.update_score()/delete_score()`；`update_homework()` 白名单新增 `due_date/material_id/chapter`。
+  - 数据库仍为 13 张表，本版不新增表。
+- 作业管理点 ✅ 完成 后作业立即进入历史页，老师随后可选填反思。不填也能保存完成状态。
+- v1.8.0 反思 dialog 在 AppTest 下按钮仍能被 at.button 识别（key `finish_dialog_ok_{hid}`），但与其他不带 key 的按钮混合时要过滤 None。
+
+## v1.7.8（学业测评新增历史记录 Tab）新增
+- 架构决策（2026-09-24）：
+  - 学业测评主 Tab 从 5 个增为 6 个；末尾「📜 历史记录」统一管理 `status="completed"` 的日常作业和试卷，作业管理不再显示已完成折叠区。
+  - 历史页学科筛选独立持久化为 `history_subject`，不与作业管理学科联动；其他字段（类型/年级/关键词）走现有 `list_homeworks(...)` 参数，页面端按 `completed_at` 倒序，避免扩展服务层排序枚举。
+  - 历史页的「再次布置」复用 `duplicate_homework()`，生成 `status="pending"` 副本不复制 `HomeworkScore`/`HomeworkAnswer`；批量导出走 `export_homeworks_zip()` 现有接口。
+  - 历史行图标按 `is_exam` 区分：试卷加 📄 + 名称后缀“（试卷）”，日常作业只显示类型 emoji。
+  - 修复 `tab_history` 在 `with SessionLocal()` 外访问 `len(hw.questions)` 触发 `DetachedInstanceError` 的隐患：`_history_row_dict()` 必须在 session 块内调用，把 list 转成 dict 再渲染。
+  - 作业管理「重新打开」按钮已删除；如需把历史作业转回进行中，先用历史页「再次布置」生成副本再编辑。
+
+## v1.7.6（学业测评全面优化）新增
+- 架构决策（2026-09-24）：
+  - `Homework` 新增状态、完成时间、最近打开时间；历史行不批量回填，靠默认状态按“进行中”处理。
+  - 作业管理只显示日常作业并按状态分组；历史试卷移到智能组卷页底部管理。
+  - “再次布置”只复制作业基本信息和题目关联，不复制成绩、作答；错题“已掌握，移除”只删除 `HomeworkAnswer`，不删除题库原题。
+  - 智能组卷取消全局难度百分比，改为“题型 × 基础/中等/拓展数量”矩阵；新 `slots` 与旧 `counts + difficulty_ratio` 都要兼容。
+  - 组卷方案和历史分别存入 `smart_compose_templates.json`、`smart_compose_history.json`，均是运行时文件，不入库。
+  - 章节仍只作为 AI 补题上下文；题库继续不按章节或年级过滤。
+  - 手动清空成绩保留学生名册和 `HomeworkScore` 行，用 `submitted=False` 表示未交。
+
+## v1.7.5（作业试卷分离，智能组卷独立 Tab）新增
+- 架构决策（2026-09-24）：
+  - 日常作业新建入口只保留课前预习、课中练习、课后作业、复习；试卷只能从独立“🤖 智能组卷”创建。
+  - 智能组卷草稿复用 `is_template=True` 隐藏，不新增字段；固定名称前缀 `__smart_compose_draft__`，模板列表按前缀过滤。
+  - 草稿确认后是普通正式试卷：`is_template=False`、`homework_type="exam"`。
+  - 重新配置、放弃、组卷失败都必须删除草稿；进入页面且无当前结果时清理异常退出残留。
+  - 作业编辑器取消智能组卷，只保留从题库选题、AI 即时出题、外部导入、手动添加。
+  - 未满足槽位不阻断预览；但总题数为 0 时不能创建正式试卷。
+
+## v1.7.4（Homework 年级字段与 AI 年级传递）新增
+- 架构决策（2026-09-24）：
+  - `Homework.grade` 使用真实可空列，走现有轻量补列迁移；加列不加表，数据库仍为 13 张表。
+  - 年级仍用中文数字存储：高中界面“高一/高二/高三”分别存“十年级/十一年级/十二年级”。
+  - 历史作业 grade 为 NULL，不批量回填；界面统一显示“未指定”。新建时选择“未指定”则保存字符串。
+  - AI 即时出题和智能组卷只把年级传给模型；题库抽题口径不变，不按年级过滤。
+  - 作业模板复制 grade，避免模板年级丢失。
+
+## v1.7.3（智能组合并，学业测评改名）新增
+- 架构决策（2026-09-24）：
+  - v1.7.2 不单独发布，其改名和基础修复并入 v1.7.3；用户可见名称统一为“学业测评”。
+  - 智能组卷对所有作业类型开放，不再判断 `homework_type == "exam"`。
+  - 题库按可落库字段过滤：学科、审核状态、知识点和当前作业已有题；不根据章节标题猜测 Question 归属。
+  - 资料和章节只进入 AI 补缺请求，用于约束内容范围；AI 失败保留题库已抽题并报告缺口。
+  - 备课区删除“按知识点组卷”入口，但服务函数 `create_paper_by_rules()` 保留。
+  - 不新增 Homework.grade 或题目章节字段，数据库仍为 13 张表。
+
+## v1.7.1（Prompt 学科通用化）新增
+- 架构决策（2026-09-23）：
+  - AI 出题和 AI 备课的系统身份均改为中小学各学科通用口径；数学只能作为理科示例，不能再限定系统身份。
+  - 两个 Prompt 都必须区分小学、初中、高中：小学重认知和活动，初中重中考和方法指导，高中重高考和思维训练。
+  - Prompt 中统一使用“理科公式”；语文、英语、政治、历史、地理等文科不强行使用公式。
+  - `verify` 只用于数学、物理、化学等有明确算式且能被 SymPy 验证的题；文科题、证明题、阅读理解、作文和材料分析题不带该字段。
+  - “数学好玩”是数学教材特定栏目，不再进入跨学科通用章节规则；“整理与复习、总复习、综合实践、练一练”继续保留。
+  - 高中教材标题新增“选择性必修、必修一/1、必修二/2、必修三/3”；“选择性必修”排在普通必修关键词之前并映射为高三。
+
+
+## v1.7.0（章节单选与暂存上下文保留）新增
+- 架构决策（2026-09-23）：
+  - 章节 key 改为单数 `question_gen_chapter`，一组任务最多绑定一个章节；下游仍使用 chapters 列表。
+  - 暂存或直接入栏后保留资料、章节和已选知识点，只清空题型行、手动知识点和其他要求；v1.6.9 的全量清空口径作废。
+  - 手动输入的新知识点必须先合并进 `question_gen_kps`，否则清空手动框后知识点会丢失。
+  - 切换学科或资料仍清空上下文和手动知识点，防止跨资料沿用章节。
+- 踩坑（2026-09-23）：
+  - AppTest 不能为空选项的 multiselect 设置不存在的值；空题库新增知识点要通过手动输入框触发。
+  - Selectbox 的 None 选项在 AppTest 中应使用 `select_index(0)`，直接设置格式化字符串可能得到非预期的内部值。
+
+## v1.6.9（待定任务暂存机制）新增
+- 架构决策（2026-09-23）：
+  - `data/pending_question_groups.json` 保存一整组当前配置；多行题型共用同一组章节、知识点、其他要求和资料。
+  - 草稿组最终统一通过 `tasks_from_pending_groups()` 展开进 `data/question_tasks.json`，不绕过现有任务栏生成流程。
+  - rows 归一化必须同时兼容中文字段和归一字段；从 JSON 读回时先把 `question_type/count/difficulty` 转回 `题型/数量/难度`，再调用 `validate_generation_tasks()`。
+  - 暂存或直接入栏后重置配置时，要同步清空 `question_gen_chapters`，否则下一组会沿用上一组章节。
+- 踩坑（2026-09-23）：
+  - AppTest 使用资料时，资料必须在 `AppTest.from_string()` 前写入临时 SQLite；页面初始化后再插入会导致资料选择框缺少该选项。
+
+## v1.6.8（出题 Bug 修复与题库年级筛选）新增
+- 架构决策（2026-09-23）：
+  - `Question.grade` 存界面显示口径（三年级/初一/高一），不存“X年级”存储名；历史题目 grade 为空，不批量回填。
+  - 题库年级筛选用等值匹配：选具体年级时隐藏空年级历史题，“全部年级”显示全部。
+  - 只有备课区 AI 出题确认入库时写 grade；作业页 AI、手工录入和导入入口保持空值。
+  - “添加一行”前必须先合并 `data_editor` 编辑态，否则 Streamlit 非控件数据会覆盖上一轮数量。
+  - 多行配置入栏时，循环只组装任务；统一 add、reset、notice 和 rerun，不能把这些动作放进循环。
+  - `material_upload` 必须保持固定 key；动态 `material_upload_序号` 会破坏 v1.6.7 的保存后清空口径。
+- 踩坑（2026-09-23）：
+  - AppTest 已挂载的 `data_editor` 不会因为直接写裸 session 字典而立即刷新显示；按钮触发路径可以读取该字典，但显示断言要放在按钮处理后的下一轮。
+  - 相关回归能发现后续“更新功能代码”提交中的口径回退；版本收尾不能只跑新测试。
+
+
+
+## v1.6.7（导出优化、勾选导出、上传清空）新增
+- 架构决策（2026-09-23）：
+  - 学生卷和教师卷信息口径分开：学生卷标题下固定“班级/姓名/得分”填写行，题号直接并入题干，完全不输出题型、难度和知识点；教师卷全部保留。
+  - Word 不渲染真实数学公式：导出前只删 `# AI教学辅助 · MEMORY.md
+
+> 项目长期记忆：架构决策、设计取舍、踩过的坑、我的纠正、重要外部资源。
+、`\(`、`\)`、`\[`、`\]` 边界标记，公式文本原样保留。
+  - 选择题选项分行口径保守：必须 A、B、C、D 四个标记各出现一次且顺序正确才拆，选项缩进 4 格；缺项或顺序错时按普通题目导出。
+  - 题库导出改为“必须勾选”：导出顺序以 AgGrid 勾选顺序为准（服务层 `questions_by_selected_ids()` 保序、不存在的 id 跳过），题号从 1 重新编号。
+  - 上传框只在资料真正保存成功、发布原文并启动后台索引后才清空（固定 key `material_upload`）；命名确认、章节预览、取消阶段都保留文件。
+  - 出题任务在 v1.6.6 之后已演进：任务带 `chapters` 字段、知识点可空（AI 可凭学科年级直接出题）；因此同步更新了 v165 的两个旧断言，这不是 v1.6.7 的功能改动。
+- 踩坑（2026-09-23）：
+  - AppTest 注入假组件时，不能在生成的隔离脚本里永久替换 `modules.lesson_plan.AgGrid` 等模块属性，会泄漏到同一 pytest 进程后续测试（表现为别的测试拿到空勾选）；必须从测试函数侧用 monkeypatch 打补丁，结束自动还原。
+  - 重建文件时若用 `git show HEAD:文件` 当基底，先确认该版本就是全绿基线；本仓 HEAD 历史被多次“更新功能代码”续接过，HEAD 内容可能与旧版本快照不一致。以对应版本快照为准确认基底。
+
+
+## v1.6.6（PDF 目录识别优化）新增
+- 架构决策（2026-09-23）：
+  - PDF 自动识别目录时，正则提取不少于 3 条就直接使用，不调用 AI；不足时 AI 只作为备选。
+  - 偏移量固定含义为 `PDF页码 = 印刷页码 + offset`，本版只允许非负整数。
+  - AI 和目录正则拿到的是书本印刷页码；PDF 内置书签拿到的是 PDF 页码，书签默认偏移为 0。
+  - `detect_pdf_chapters()` 默认返回章节列表，`return_details=True` 才返回偏移、来源和印刷页码，避免破坏旧调用。
+  - 手动调整偏移会整体重算章节，覆盖单题手工页码；跨轮成功提示写入 `materials_notice`。
+  - 自动化测试使用 PyMuPDF 构造合成 PDF；真实北师大教材只做本机可选抽查，不进入测试依赖。
+
+## v1.6.5（教案模板通用化和出题任务栏）新增
+- 架构决策（2026-09-22）：
+  - `data/question_tasks.json` 是出题任务唯一来源；旧 `question_drafts.json` 只在首次进入页面时迁移一次，迁移后清空，不做双写。
+  - 每条任务独立保存学科、年级、题型、难度、数量、资料、知识点和补充要求；页面顶部年级/学科只是新建任务默认值。
+  - 混合任务逐条调用模型，保证每条请求的年级、知识点和资料不串；单条任务失败只记录该任务，不中断其他任务。
+  - 出题历史“带回配置”只恢复任务栏，不自动生成；旧历史配置继续兼容转换。
+  - 内置教案模板只保留“通用模板”；历史文件中的语文/数学内置模板过滤显示，自定义模板全部保留。
+  - radio/selectbox 等 widget 的跨轮恢复必须在控件创建前写入待处理状态，不能在控件实例化后直接修改对应 session_state。
+- 踩坑（2026-09-22）：
+  - 单进程连续执行全部 AppTest 会在本机耗尽 Windows 页面文件，表现为长时间无输出或进程静默退出；需要时按测试文件使用独立进程验证。
+
+## v1.6.4（AI 备课区优化）新增
+- 架构决策（2026-09-22）：
+  - AI 备课只保留一套章节多选，固定 key `lesson_chapter_select`；不再额外使用关键词输入框，直接依赖 multiselect 自带搜索。
+  - 教案模板固定 key `lesson_template_select`，移入“📝 备课参数”单列区域；自定义模板导入流程不变。
+  - 北师大版“第X单元”单独成行时，仅当下一行是 20 字以内且不是章节标题的短文本才合并；合并行不进入正文。
+  - 固定识别 `整理与复习、总复习、数学好玩、综合实践、练一练`；不识别无编号短课时，也不识别泛化“复习、练习”。
+  - 章节标题若以句读标点结尾，按正文句处理，避免“第一单元正文。”误判。
+  - PDF 章节优先推荐内置书签，其次 AI 识别和规则切分，老师可手工编辑。
+
+## v1.6.3（备课区全面优化）新增
+- 架构决策（2026-09-22）：
+  - 资料保存后守护线程自动建向量索引，成功置“已索引”；`build_index` 返回 `keyword` 兜底时不算向量化，保留未索引状态。
+  - 年级“存旧显新”：DB 存 七/八/九年级，界面统一显 初一/初二/初三，转换函数集中在 `app_config`（to_display_grade/to_storage_grade），不批量改库。
+  - 教案生成即入库“课题（草稿）”，`lp_meta['plan_id']` 贯穿编辑保存，同课题草稿复用 `find_plan_by_title`。
+  - 出题待定任务持久化到 `data/question_drafts.json`（DRAFTS_FILE_PATH 可 monkeypatch）；历史题目快照走 question_history 的 `question_snapshot` 字段，随 50 条上限清理。
+  - 题库改 AgGrid：点普通单元格经 onCellClicked 写隐藏 `clicked_id`，复选框列做批量选择；批量审核收到表格上方按钮后才展开。
+  - 知识点组卷知识点下拉来自 `get_all_knowledge_points`，规则行编辑仍用 NumberColumn 规避 SelectboxColumn 的 DOM 风险。
+  - PPT 生成后先 `preview_ppt` 解析每页标题/要点，确认再下载；自定义模板改名/删除只作用于非内置项。
+- 踩坑（2026-09-22）：
+  - `JsCode` 的 JS 源码在属性 `.js_code`，`str()` 只会得到对象地址，断言要取 `.js_code`。
+  - patch 脚本里写 `"\n"` 若用了三引号真实换行，会把换行字面量写进目标文件导致语法错误；需要字符串里写 `\n` 转义。
+  - 自动建索引的 drop_index 即使内部已 try，外层 `delete_material` 仍再包一层，避免测试替身抛异常中断删除。
+  - 历史测试里有写死日期（错题重做卷_YYYYMMDD），跨天后失败，改为动态当天。
+
+## v1.6.2（资料原版打开与备课区体验优化）新增
+- 架构决策（2026-09-21）：
+  - 原始文件 canonical 目录为 `data/uploads/original/`，Streamlit 静态目录为 `static/uploads/original/`；发布时优先硬链接，跨卷或失败时复制。
+  - 资料列表中 PDF/Word/网络资料使用新标签页入口，另有“详情”按钮；旧资料缺原文时只保留详情。
+  - OCR 启动时原文先放 `data/uploads/ocr_source/`，确认命名后移动到 canonical；删除/清理任务时同步删除原文和暂存识别结果。
+  - AI 出题的 drafts 按学科保存，学科切换只替换当前学科配置；任务删除走勾选路径，生成时只汇总存在有效任务的学科。
+  - PDF 章节优先级为内置书签 → 目录页/前 20 页 + AI → 规则切分；AI 章节由老师手动触发，识别失败不阻断保存。
+- 踩坑（2026-09-21）：
+  - Streamlit AppTest 不暴露 `link_button`，也不能把 DataFrame 直接塞进 data_editor 的 widget key；测试通过服务层函数和 DataEditorState 字典重建结果。
+  - DataEditorState 的 `edited_rows`、`deleted_rows` 行号都指向原始 DataFrame，重建时必须先应用编辑、再倒序删除。
+
+## v1.6.0（备课区全面优化）新增
+- 架构决策（2026-09-21）：
+  - 资料名用页内无边框按钮和 `mt_detail_id` 状态进入详情，不用 Markdown 伪链接、URL 或 query params。
+  - 资料导入先提取内容，再用弹窗确认名称和年级；取消不创建资料。
+  - OCR 完成后的全文先写 `data/ocr_results/{task_id}.txt`，只有老师确认命名后才创建 Textbook 并复制全文；取消命名则保留暂存文件。
+  - OCR 停止使用 `threading.Event`，检查点放在页与页之间；不强杀正在运行的一次 OCR 引擎调用。
+  - AI 备课只把老师选中的资料章节作为上下文；教案模板内容追加到系统提示。
+  - AI 出题按学科逐个调用模型并汇总；计算题、应用题、证明题、阅读理解、作文、材料分析等扩展题型只用于提示，入库仍归一为 solution。
+  - 知识点组卷只从已审核题目抽题，不使用 AI 补题；规则之间共用同一题时按缺口处理，全部满足才创建 exam 作业。
+  - 自定义 PPT 模板生成时必须删除示例页关系和旧 slide 部件，否则新幻灯片会和旧 `slide1.xml` 重名。
+- 踩坑（2026-09-21）：
+  - AppTest 对后台 OCR 不自动等待，测试必须轮询状态 JSON；修改任务状态前先等后台线程结束，避免最终状态被线程回写覆盖。
+  - 临时 PPT 模板目录不在项目根目录时，模板元数据允许保存绝对路径，不能强依赖 `Path.relative_to(config.BASE_DIR)`。
+
+## v1.5.8（OCR 后台运行修复）新增
+- 架构决策（2026-09-21）：
+  - 扫描件 OCR 放到独立守护线程，切换 Streamlit 主导航只停止页面渲染，不终止线程；应用完全退出后任务才中断。
+  - 任务状态集中在 `data/ocr_tasks.json`，记录状态、当前页、总页数、资料 ID 和字数；OCR 全文只写入既有 `data/uploads/text/{id}.txt`，避免同一文本重复存储。
+  - 多个 OCR 任务可并行；后台线程通过 `threading.local()` 各自持有 RapidOCR 引擎，不共享引擎对象。
+  - OCR 完成后自动创建 Textbook，资料立即可见并支持关键词兜底检索；向量索引仍由老师手动触发。
+  - 应用重启后把等待中/识别中的旧任务标记失败并提示重新上传，避免任务永久卡在识别中。
+- 踩坑（2026-09-21）：
+  - 后台任务的进度写入需要全局锁；任务运行中不能移除状态记录，否则线程后续无法回写进度或结果。
+  - AppTest 不会自动等待后台线程，测试要轮询 JSON 状态，再主动 `at.run()` 刷新页面断言。
+## v1.5.7（OCR 功能）新增
+- 架构决策（2026-09-21）：
+  - 桌面端扫描件 PDF 使用新版统一包 `rapidocr==3.9.2`，复用本地 ONNX Runtime；不使用旧包 `rapidocr-onnxruntime`。
+  - OCR 独立封装在 `utils/ocr_service.py`，备课页只调用判定和识别接口；以后小程序或 Web 后端需要 OCR 时，把同一识别能力放后端，再替换引擎即可。
+  - 扫描件按“每页平均有效字符少于 20”或“存在无文本页”判定；识别结果为空、模型异常都抛固定中文 OCR 错误。
+  - OCR 文本不另建流程，成功后继续走资料章节预览、保存文本和向量索引；数据库仍为 13 张表。
+- 踩坑（2026-09-21）：
+  - RapidOCR 3.x 的结果对象用 `txts` 字段，不是旧版常见的嵌套 list；适配时按 `result.txts` 提取。
+  - 新版包不强制安装 onnxruntime，但本机已有 1.30.0；requirements 只锁 rapidocr，运行时复用环境中的 onnxruntime。
+
+## v1.5.5（教学日历优化）新增
+- 架构决策（2026-09-21）：
+  - 课程安排表是教师本地每周固定安排，使用 `data/class_schedule.json`，不新增数据库表。
+  - 周课表保存按“整个班级的完整 7 天 × 8 节”替换；空白格删除课程，其他班级不受影响。
+  - Excel 导入只允许使用已存在班级；同一时间格重复时，以后出现的行覆盖前面的行。
+  - 首页本周预览复用日历事件服务；表格单元格不能可靠绑定跳转，使用固定 key 按钮进入完整日历。
+- 踩坑（2026-09-21）：
+  - `st.dataframe()` 不渲染 Markdown，`**15**` 会原样显示；表格中的日期应直接给纯文本。
+  - pandas 3 的 `DataFrame.to_excel()` 必须传 `BytesIO` 或文件路径，不能无参数调用。
+
+## v1.5.4（展示与导出优化）新增
+- 架构决策（2026-09-21）：
+  - 补做原 v1.5.1 范围时不能倒序，最终版本号为 v1.5.4；v1.5.1 只作为需求来源，不单独发布。
+  - 成绩单格式化集中在 `exam_service.build_score_report_xlsx()`，错题 PDF 集中在 `homework_score_service.export_wrong_pdf()`，页面只负责选择考试、班级和下载。
+  - 错题 PDF 按知识点分组时，一道题整题归入每个知识点，不做分数或题数拆分；错误次数按当前筛选结果统计。
+  - 教案 Word 固定包含作业布置章节，内容从教学过程的“作业布置”环节提取；教学反思预设作为附加章节保留。
+- 踩坑（2026-09-21）：
+  - python-docx 设置 `w:eastAsia` 等带命名空间属性时必须用 `qn()`，直接 `set("w:eastAsia", ...)` 会被 lxml 判定为非法属性名。
+  - PyMuPDF Story 可通过 Archive 嵌入系统微软雅黑；不复制字体文件，只在生成 PDF 时读取。
+  - README 没有真实截图时使用明确中文占位，不添加伪造图片或失效链接。
+
+## v1.5.3（核心功能完善：首页、错题重做卷）新增
+- 架构决策（2026-09-21）：
+  - 首页是默认主导航页；统计集中在 `utils/dashboard_service.py`，页面模块 `modules/dashboard.py` 只负责展示。
+  - “本学期”按日期推导：9 月至次年 1 月为秋季，2 月至 8 月为春季；首页统计本学期教案、本月普通作业、最新考试总分均分和待批改作业。
+  - 待批改推断：有班级作业按班级名册核对，缺总分即计数；无班级作业无法确认应收人数，只有完全没有总分记录才计数。
+  - 跨页快捷入口写固定状态：`_pending_main_page` 负责主导航，`main_nav` 在 radio 创建前同步；Tab/弹窗/导入区分別写 `lesson_plan_tab`、`analysis_tab`、`hw_new_dialog_open`、`score_import_expander`。
+  - 错题重做卷由 `homework_service.generate_retry_homework()` 创建；修改难度必须克隆 `Question`，不能改原题，也不能给 `HomeworkQuestion` 加难度列。
+- 踩坑（2026-09-21）：
+  - Streamlit AppTest 触发按钮时会重新挂载 data_editor；`click()` 后、`run()` 前要再注入一次编辑态，否则确认按钮那一轮读到的是空状态。
+  - data_editor 编辑态按行号保存改动，隐藏列不可靠；确认时用原始预览 items 的行号补回 `question_id`，再合并难度和分值。
+
+## v1.5.2（高级功能：知识点、快捷键、日历）新增
+- 架构决策（2026-09-21）：
+  - **考试与题目无关联**：考试只有每科总分，逐题得分（`HomeworkAnswer`）挂在作业上；知识点掌握分析一律基于“作业 + 逐题批改”，不做无源的按考试口径。
+  - 知识点归属“整题分别计入每个标签”：题的满分/实得分对它的每个 knowledge_point 各计一次，不均分；无标签归「未标注知识点」；只统计 earned_score 非空的已判作答。
+  - 业务归属继续显式传参、服务层 `subject=None` 不过滤的约定不变；版本 1.4.6 直接跳 1.5.2，v1.5.0/v1.5.1 未做。
+  - 快捷键走一次性注入的全局 JS：JS 在 `components.html` 同源 iframe 内必须用 `window.parent.document` 才能操作侧边栏；只做 Ctrl+1/2/3/4 和 Ctrl+K，避开浏览器保留的 Ctrl+N/S。
+  - 日历不引组件、自绘月历（`calendar_service.month_weeks`）；考试用 exam_date，作业/教案用 created_at；“去新建”只跨页跳转、不自动开弹窗。
+- 踩坑（2026-09-21）：
+  - AppTest 的 Tab 是 Block、没有 `select()/click()`；脚本运行时所有 `with tab:` 内容都会执行，直接断言目标控件即可，不要试图“切 Tab”。
+  - 验证快捷键要看侧边栏真实 `input[type=radio]` 的 checked + closest('label') 文本；按 react-aria 的 `[role=radio]/aria-checked` 在本版本取不到。
+  - 发 Ctrl+数字前要先让顶层窗口拿焦点（点标题区）；CDP keyEvent 需带 modifiers=2（Ctrl），否则快捷键不触发。
+  - websocket 连新版 Edge CDP 要 `suppress_origin=True`，控制台打印 emoji 设 `PYTHONIOENCODING=utf-8`。
+
+## v1.4.6（教师端体验优化）新增
+- 架构决策（2026-09-20）：
+  - 趋势的“时间筛选”和“显示范围”是两个独立维度，叠加关系为“先按学期/学年过滤、日期升序 → 再取最后 N 场”，不是互斥模式；过滤考试 ID 后仍以 `exam_ids` 传给现有服务，服务层签名不变。
+  - 业务归属继续显式传参：学生表动态新增、班级表格改名都不新增写库路径，分别复用 `sync_students()` 和新增的 `class_service.sync_classes()`；班级表格“保存（新增/改名）”和“勾选删除”是两条独立路径。
+  - 阈值面板和班级面板只换位置（考试分析 Tab 顶部 / 学生管理 Tab），`analysis_thresholds.json`、`class_names.json` 文件结构和服务逻辑不变。
+  - 学生表保留动态行 + 性别 TextColumn：性别不为男/女归一为 None，不恢复 SelectboxColumn，规避历史 DOM 问题。
+- 踩坑（2026-09-20）：
+  - CDP 验证 removeChild 不能靠双击空白新增行——真实回归风险点是“筛选切换导致 data_editor 组件重建”；班级筛选多次切换后 hook `Node.prototype.removeChild` 全程未抛错才算覆盖到该场景。
+  - Glide data grid 双击后出现的编辑覆盖 input 取值被内部接管，直接注入 `Input.insertText` 不稳定；CDP 下应聚焦该覆盖 input 再输入，且不要把文字误打到筛选框。
+  - Edge 新版 CDP WebSocket 握手校验 Origin，websocket-client 需 `suppress_origin=True`，控制台 GBK 打印 emoji 要设 `PYTHONIOENCODING=utf-8`。
+
+## v1.4.5（趋势分析与考试分析优化）新增
+- 架构决策（2026-09-20）：
+  - 趋势的学期、学年只按 `Exam.exam_date` 推导，不依赖手填 `Exam.term`；X 轴标签由 `short_semester_name + 考试名` 组成，同学期同名用序号去重。
+  - 趋势过滤服务统一用可选 `exam_ids`，默认 `None` 表示旧行为；班级和个人趋势都把单科与总分拆图，缺考继续为 `None`。
+  - 考试分析阈值独立保存在 `data/analysis_thresholds.json`，服务层只收可选 thresholds，页面未传时读本地默认；排名展示顺序可切换，但竞赛排名口径本身不变。
+  - 趋势预测在 v1.4.5 下线；`describe()` 的 median/std 字段保留给内部或未来使用，当前 UI、AI 文本和导出不展示。
+- 踩坑（2026-09-20）：
+  - AppTest 不暴露 `st.plotly_chart` 对象，图表数量不要用 `at.plotly_chart` 断言；趋势拆图测试应断言控件/会话状态和 `at.exception == []`。
+  - 长表的单科排名和总分排名都要先按考试、班级过滤再排名，不能拿全库分数排；缺考行保留，但不进入排名。
+
+## v1.4.2（数据价值提升）新增
+- 架构决策（2026-09-20）：
+  - 班级继续不建表：空班级用 `data/class_names.json` 保留，页面班级下拉合并 JSON、学生表和作业表；重命名是同一个班级的口径修正，同步学生和作业。
+  - 学期报告做确定性汇总，不调用 AI；趋势图用 Plotly + kaleido 导出 PNG，错题统计依赖逐题批改数据。
+  - 线性预测只使用最近 3–5 个有效点，缺考不补零；预测值按最近一场满分裁剪，只用于图表。
+- 踩坑（2026-09-20）：
+  - 班级“全部科目”图追加预测时，满分必须从 `exam_meta[-1]` 取，不能复用循环外变量，否则切换单科/全科会出现未定义变量或取错满分。
+  - AppTest 的下载按钮 proto 不暴露 `file_name`，文件名要用纯函数（`_safe_filename`）单测，AppTest 只断言保存按钮出现。
+
+## v1.4.1（效率工具）新增
+- 架构决策（2026-09-20）：
+  - 页内 tab 跳转不做 URL 超链接：data_editor 单元格只能放 URL（点击整页刷新、丢未保存编辑），统一用受控 `st.tabs(key=,default=)` + 写 session_state 目标 tab 和选择器 key 后 rerun，无刷新、可回退。
+  - 学生勾选批量删除与 data_editor 字段编辑保存必须是两条独立路径：勾选只收集 id 走独立二次确认，不经过 sync_students，避免“勾选用意删除”和“字段保存”互相干扰。
+  - 错题题篮是 session_state 临时状态（`next_hw_question_basket`，question_id 去重），不持久化、不跨重启；新建作业时按题的 subject 与弹窗学科比对，只带入同学科题，异学科保留题篮并提示。
+- 踩坑（2026-09-20）：
+  - **st.data_editor 没有行选择回调**（只读 st.dataframe 才有 on_select），多选勾选只能加 `CheckboxColumn`；而 AppTest 不能对 dataframe 调 set_value()，勾选要通过 `at.session_state[key]={"edited_rows":{"0":{"选择":True}},...}` 注入，且按钮触发的那一轮 widget 会用空状态覆盖它——必须在 `btn.click()` 之后、`at.run()` 之前再注入一次。
+  - **AppTest 无法断言 tab 激活态**：受控 tab 跳转的测试改为断言 session_state 里的目标 key（如 analysis_tab、hw_open_id），不要去检查哪个 tab 可见。
+  - 题篮接入新建作业时，`session.commit()` 必须在 basket 判断之外无条件执行；一度把 commit 移进 `if basket:` 导致空题篮时作业随会话关闭回滚（弹窗正常关闭、id 有值、库里 0 行），旧测试才兜住。
+
+## v1.4.0（基础体验优化）新增
+- 架构决策（2026-09-20）：
+  - 学生标签继续用自由文本（逗号/中文逗号/顿号分隔），不建标签表、不转 JSON；`list_student_tags()` 每次从文本拆分去重排序。筛选只影响编辑器当前显示的学生，`sync_students` 只提交当前筛选结果集，避免误删不可见学生。
+  - 学期筛选只加在考试分析：考试本来有 Exam.term 字段，成绩管理/趋势/反思不加（成绩按科目列横向 upsert，隐藏列有误清风险）。空学期旧考试只在“全部学期”出现。
+  - 作业列表的关键词/类型/班级筛选只作用于普通作业，模板仍只按学科过滤，避免模板被班级等普通作业属性意外隐藏。
+  - 所有新增筛选控件用固定 key（`homework_filter_*`、`student_filter_*`、`analysis_term_filter`），不拼筛选值，不手动 st.rerun。
+  - 成绩导入模板下载放在“先建考试”拦截之前：老师还没建考试也能先下载模板去填数据。
+- 踩坑（2026-09-20）：
+  - Streamlit AppTest 的 `download_button.value` 是点击布尔状态，拿不到文件 bytes；下载内容要用纯函数（`score_template_dataframe()`）单独做单元测试，AppTest 只断言按钮存在。
+
+## v1.3.1（作业弹窗状态修复）新增
+- 踩坑（2026-09-20）：
+  - **弹窗开关是临时 UI 状态，不能跨主导航残留**。只在点击按钮当帧创建弹窗的模式，需要在 app.py 记录上一页面；从作业页切到其他主导航时统一调用 `homework.close_new_homework_dialog_state()`。不能在作业页每次渲染时强制设 False，否则点击按钮后的 rerun 会立刻关掉弹窗。
+  - 作业列表学科选择器和新建弹窗学科选择器必须分开：前者只筛选已有作业/模板，后者只决定新作业归属；界面上要写清用途，避免被误认为重复控件。
+  - 这类问题 AppTest 要模拟“打开弹窗 → 切主导航 → 切回”，只测首次进入页面无法复现。
+
+## v1.3.0（功能级学科切换）新增
+- 架构决策（2026-09-20）：
+  - 全局 `current_subject` 彻底下线；学科归属由各业务动作显式传参，服务层不再偷偷读取全局界面状态。`utils/app_config.py` 只保留学科常量、默认值和校验。
+  - 各功能选择器的跨重启记忆独立存到 `data/feature_subjects.json`：8 个固定 key 分别管理资料、AI 备课、AI 出题、题库、PPT、作业列表、新建作业、错题本。一个功能切学科不影响其他功能。
+  - 教案继续不加列，学科放 `LessonPlan.content` JSON 顶层 `subject`；旧教案缺字段按数学兼容，`list_plans(subject=None)` 不传仍返回全部。
+  - 已打开的作业编辑上下文以 `Homework.subject` 为准，不能跟随作业列表选择器变化，否则会出现“打开数学作业却加入物理题”的串科问题。
+  - 成绩录入和作业分析不做学科过滤：下拉展示全部作业并标注学科，业务数据按作业自身归属处理。
+- 踩坑（2026-09-20）：
+  - `st.form` 内的 `st.selectbox` 不能使用 `on_change`（Streamlit 只允许提交按钮回调）；AI 备课、AI 出题的功能学科要在表单提交成功后手动写入 `feature_subjects.json`。
+  - 同一页面有多个 label 为“学科”的 selectbox，AppTest 必须按固定 `.key` 定位，不能按 label 取第一个。
+  - AppTest 隔离必须同时 patch 临时 SQLite 和 `utils.feature_subjects.FEATURE_SUBJECTS_PATH`；runpy 脚本内也要在执行 app.py 前 patch，避免进程内模块和脚本内模块读到不同路径。
+
+## v1.2.5（成绩导入扩展）新增
+- 架构决策（2026-09-20）：
+  - Word/PDF 成绩文档解析后不另造科目规则，统一转 DataFrame 交给 `excel_handler.detect_score_columns/extract_scores`；预览也统一走 `scores_preview_frame/preview_to_records`，三格式只有“解析器”不同。
+  - PDF 只认 PyMuPDF `find_tables()` 的规范线框表，识别不出就提示转 Excel；不做 OCR、不猜空格对齐，宁可少识别也不能把分数错位入库。
+  - 成绩预览用 `st.data_editor`，问题只放只读「问题」文字列；data_editor 不支持可靠行底色，不再追求红行。
+  - 图表切换按统计意义给：分数段可柱状/饼图，各科均分可柱状/折线，排名只做固定横向条形，不提供无意义饼图。
+- 踩坑（2026-09-20）：
+  - **确认导入后同一帧 `st.success()` 再 `st.rerun()`，提示会被下一轮渲染冲掉，AppTest 也抓不到**。做法是把文案写入 `st.session_state["score_last_import"]` 后 rerun，下一轮面板开头 pop 并显示 success。
+  - PyMuPDF 1.28 对入参区分很严格：`bytes` 用 `open(stream=io.BytesIO(...), filetype="pdf")`，`str/Path` 必须走 `open(filename)`，类文件对象（Streamlit UploadedFile）才走 `open(stream=file_like, filetype="pdf")`；把 Path 当 stream 会直接 `TypeError: bad stream`。
+
+## v1.2.4（学科深化）新增
+- 架构决策（2026-09-20）：
+  - **学科与标题解耦**：设置页恢复学科选择器，但标题/图标保持固定「📐 AI教学辅助」。切换学科只改数据归属/过滤，不碰 page_title/page_icon，彻底绕开 v1.2.3 的动态 page_icon DOM bug。
+  - 过滤参数一律默认 `None`=不过滤（`list_questions/list_homeworks/list_wrong_answers/create_*`），保证旧调用和 195 个旧测试零行为变化；只有页面显式传当前学科才过滤。
+  - `Question.subject`、`Homework.subject` 用 SQLite `ADD COLUMN ... DEFAULT '数学'` 完成存量归属，不写回填脚本；Textbook 过滤口径是 `subject==当前 OR subject IS NULL`（兼容极旧资料），Question/Homework 因有 DEFAULT 直接等值过滤。
+  - 学科全局单选，不做多学科并行；历史 Score 按 Excel 列名识别，不重标学科，单科查看走「考试分析视角/趋势科目选择器」。成绩管理**不**加列过滤（按列 upsert，隐藏列有误清其它科风险）。
+  - 教案不隔离：`LessonPlan` 不加字段、已存列表不过滤，只在 AI 备课/出题 user 消息带「学科」。
+  - demo 脚本默认只重写 Excel，`--wipe` 才清库写示例（`backup_service.wipe_business_data`）；9 科满分语数英 150/其余 100，固定种子，3 个缺考存 NULL。
+- 踩坑（2026-09-20）：
+  - **随选择器变化的 widget key 会产生孤儿状态**：单科排名搜索框最初用 `key=f"rank_search_{subject}"`、趋势科目多用 `key=..._{subject}`，在「总分总览↔单科」「科目」切换、控件被卸载重建后，AppTest 回灌旧 widget 状态时报 `KeyError: session_state has no key`（自动 id、key=None、动态 key 三种都中招）。正确做法与 v1.2.3 data_editor 同款：**固定 key**，需要随选择刷新默认值时在渲染前比较标记、`session_state.pop(固定key)` 重置。
+  - AppTest 的 selectbox `.value` 是选中索引（用了 format_func/options 为 range 时），不要拿它断言题干文本；过滤是否生效用「共 N 道题」caption 计数或空状态 info 兜底更可靠。
+  - PowerShell here-string 内嵌 Python 三引号 docstring 会与外层 `r"""` 冲突报 U+3002，外层改用 `r'''` 即可；长文件用临时 UTF-8 Python writer 脚本写入，别用 `-replace`（GBK 会坏中文）。
+
+## v1.2.3（前端 bug 紧急修复）新增
+- 架构决策（2026-09-19）：
+  - 学科切换**临时下线**：界面标题/图标固定“📐 AI教学辅助”，设置页删除“当前学科”面板，真实 app_config 重置为数学；但 `utils/app_config.py` 和备课资料归属、题库/错题导出名、新建考试默认学科行等底层逻辑全部保留，恢复时只需还原设置页面板和动态标题。
+  - 为避免与未做的两批（学科深化、成绩导入扩展）撞号，本紧急修复占 v1.2.3，后两批顺延 v1.2.4/v1.2.5。
+- 踩坑（2026-09-19，两个都是前端交互、AppTest 抓不到）：
+  - **@st.dialog 必须贴在真正的弹窗内容函数上，绝不能贴在 on_click 回调上**。我上一版补丁把装饰器误留在类型回调 `_choose_new_homework_type`，结果“新建作业”表单平铺在页面里、点类型才弹出一个空弹窗。正确结构：普通回调函数（只写 session_state，不加装饰器）+ `@st.dialog` 装饰的 `_new_homework_dialog`。AppTest 不区分是否在模态里，行为测试全绿也发现不了；可用被装饰函数自带的 `__wrapped__` 属性写静态回归断言（内容函数有、回调没有）。
+  - **st.data_editor 的 key 不能拼筛选条件/版本号**：key 一变组件整体重建，编辑单元格时和 glide-data-grid 的 DOM 操作冲突，报 `Failed to execute 'removeChild'`。正确做法是 key 固定常量；需要因筛选/搜索变化刷新数据时，在取数前比较签名、变化时 `session_state.pop(固定key)` 主动丢弃编辑器缓存，保存成功后同样 pop 再 rerun。性别 SelectboxColumn 选项仍只放男/女、空值用 None。
+  - 教训：上一版“194 全绿 + Edge 采样弹窗不消失”仍漏掉装饰器贴错，是因为当时按文本采样且没断言弹窗数量/是否模态。这次 Edge CDP 改为同时采样 `[data-testid=stDialog]` 的数量（恒为 1、无第二个空窗）才坐实。
+
+## v1.2.1（基础体验与 bug 修复）新增
+- 架构决策（2026-09-19）：
+  - 应用通用名固定为“AI教学辅助”，界面动态标题统一是 `AI教学辅助·{当前学科}`；历史资料目录名不改。
+  - 学生表格采用“显式保存”而不是每次编辑立即入库；删除行会先二次确认，再由服务层统一新增、更新、删除。
+  - 考试满分不再用 `数学=120,语文=120` 单行文本，改由页面逐行编辑、服务层 `rows_to_full_scores()` 校验后仍存原有 JSON 文本字段。
+- 踩坑（2026-09-19）：
+  - `@st.dialog` 弹窗内只要有按钮触发 `st.rerun()`，外层就不能只在“打开按钮点击当帧”调用弹窗函数；必须用持久状态（如 `hw_new_dialog_open`）在后续每次 rerun 继续挂载弹窗。
+  - Streamlit `st.data_editor` 编辑数据库表时，要在数据里保留隐藏业务 ID（如“学生ID”），保存时靠 ID 定位记录；不能用表格行号，筛选、排序或新增行后行号会错。
+  - AppTest 会把 `st.data_editor` 暴露在 `at.dataframe`，不能用普通 dataframe 的编辑 API 模拟输入；保存规则应主要用服务层测试覆盖。
+  - 【发布后补丁】弹窗内“切换选项就重渲染弹窗内容”的正确做法是普通按钮/表单提交按钮用 `on_click` 回调改 state，**回调外不要再手动 `st.rerun()`**：手动整页 rerun 会把 dialog 整体卸载再由持久 state 重挂，肉眼就是“闪退再出现”。只有“创建成功/取消”这种需要真正关闭弹窗的场景才整页 rerun。`st.rerun(scope="fragment")` 在整页运行上下文或表单提交里会直接抛 `StreamlitInvalidLayoutContextError`，不能用来解决这个问题。
+  - 【发布后补丁】`st.data_editor` 的 `SelectboxColumn` 不要把空字符串 `""` 放进 options，也不要用空字符串当“未设置”的初值：空串既是空值又是合法选项，glide-data-grid 切换时会抛 `Failed to execute 'removeChild'`。正确做法是 options 只放真实值（如男/女），未设置一律用 `None`；这个 DOM 报错 AppTest 抓不到，必须真实浏览器验证。
+  - 本机无 Chrome、无 Playwright/Selenium 时，可用系统自带 Edge（Chromium）加 `--remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir=临时目录` 起服务，再用 conda 里已装的 websocket-client 直连 CDP（HTTP /json 取 page 的 webSocketDebuggerUrl），用 `Runtime.evaluate` 执行 JS、`Input.dispatchMouseEvent/KeyEvent` 模拟真实输入、`Page.captureScreenshot` 截图；验证“闪退”要用 setInterval 16ms 高频采样弹窗文本是否消失，MutationObserver 在整页 rerun 下会误报。
+
+## v1.2（全科学科切换架构）新增
+- 架构决策（2026-09-19）：
+  - 当前学科是**全局单选**，配置独立放在 `data/app_config.json`，不进数据库；同一时刻不按班级/课程并行管理多个学科。
+  - 学科切换只影响应用标题、图标、新资料归属和导出文件名；历史成绩仍按成绩表列名识别，历史资料/成绩不批量迁移。
+  - `config.get_app_name()` 用函数动态生成名称，并在函数内延迟导入 `utils.app_config`，避免 config 与 app_config 循环导入。
+  - `Score.subject`、`Textbook.subject` 的数据库默认值保留“数学”，这是历史兼容默认；新代码写资料时必须显式使用当前学科。
+- 踩坑（2026-09-19）：
+  - AppTest 测配置必须同时隔离 `utils.app_config.APP_CONFIG_PATH`；`from_string` 的 runpy 脚本里也要在执行 app.py 前改路径，否则进程内模块和脚本内模块可能读到不同路径。
+  - Streamlit 页面函数只在 `show()` 里实际调用；新增 `_current_subject_panel()` 后若忘记挂进 `show()`，函数存在但页面不会出现，测试必须断言 selectbox 和说明文案而不是只断言无异常。
+
+## 阶段6（v1.1 网页资料抓取）新增
+- 架构决策（2026-09-19）：
+  - 只做老师主动输入的单个公开 URL，复用 `Textbook.file_type="link"`、`file_path=URL`，不新增表；保存的是抓取时正文快照，原网页变化不自动同步。
+  - trafilatura 分两步：`fetch_url(url, config=...)` 只负责下载，`extract(...)` 提取正文；配置固定为 30 秒超时、最多 2 次重定向，网络/提取失败最多 3 次（1s、2s），非法 URL 不重试，正文上限 100,000 字。
+  - 同一 URL 先查重再抓取，避免重复网络请求和重复资料；网页标题、URL、抓取日期写进纯文本开头，后续章节切分、文本落盘和三级 RAG 检索全部复用旧链路。
+  - 网页内容只作为 RAG 素材放进 user 消息，并明确标注不可信外部数据；不执行脚本、不下载附件、不处理登录态。
+- 踩坑（2026-09-19）：
+  - Streamlit 的 `selectbox` 放在 `st.form` 内时，切换选项不会立刻重跑页面，导致选“网页链接”后 URL 输入框不能即时出现；来源类型必须放在 form 外，具体提交字段放 form 内。
+  - SQLAlchemy 会话关闭后不能再访问 `exists.name` 这类 ORM 属性；重复资料名称要在 `with SessionLocal()` 内物化成普通字符串。
+
+## 阶段5（v1.0.1 功能说明 PDF）新增
+- 架构决策（2026-09-19）：
+  - 开发指令只定义到阶段4(v1.0)，"阶段五"是用户新增的纯文档任务：出一份记录 v0.1→v1.0 每版功能的中文 PDF。按 v1.0.1 文档版管理（升 config.APP_VERSION、CHANGELOG 条目、versions 快照、git 提交），但不改业务代码、不动数据库（仍 13 张表）。
+  - PDF 用已装的 **PyMuPDF Story**（HTML/CSS 排版 + DocumentWriter 循环 place/draw 自动分页），不装 reportlab/fpdf。版本功能数据在 scripts/generate_feature_pdf.py 顶部用结构化常量 VERSIONS 维护（整理自 CHANGELOG，不解析自由文本）。
+  - 字体用系统微软雅黑：`fitz.Archive()` 后 `archive.add(bytes, "regular.ttc")` 直接喂字体字节（add 第二参数 path 是归档内逻辑名，不是磁盘路径），CSS 里 `@font-face{src:url(regular.ttc)}`；不用复制字体进项目。**必须 doc.subset_fonts() 再 save(garbage=4,deflate=True)**，否则整套 ttc 嵌进去单文件 19~36MB，子集化后约 300KB。
+- 踩坑（2026-09-19）：
+  - DocumentWriter 写完后在 Windows 立刻 unlink 中间 pdf 会 PermissionError（句柄延迟释放）；中间文件放 tempfile.mkdtemp，子集另存目标后 `del writer,doc,story; gc.collect(); shutil.rmtree(..., ignore_errors=True)`。
+  - Story 的 place 用内容矩形（`mediabox + (50,56,-50,-56)`），begin_page 用完整 mediabox；dev 没有 .rect 属性。
+  - PyMuPDF 提取 Story 生成的中文 PDF 时，粗体和中英混排之间会插 `\xa0` 不间断空格，断言文本要先 `re.sub(r"\s+","",text)` 再匹配，别误判成缺内容。
+  - CSS 百分号在 Python 字符串 `.replace("%%","%")` 模板里要转义成 %%（width:100%%），和 %PRIMARY% 占位替换一起做。
+  - **PyMuPDF Story 的 HTML table 列宽不可靠**：`width:%`、`table-layout:fixed`、`colgroup/col width` 都可能不被采纳，窄列会竖排、宽列占满。固定列表格不要继续和 CSS 较劲：正文仍用 Story，表格位置放固定高度占位 marker，渲染后 `search_for(marker)` 定位，redaction 抹掉 marker，再 `draw_line/draw_rect + insert_htmlbox` 手动绘制；用线坐标回归测试锁死列边界。
+
+## 阶段4（v1.0 正式版）新增
+- 架构决策（2026-09-19）：
+  - 表 10→13 只增不改旧表：TeachingReflection（反思留档，scope_type=exam|range，content 存 raw+四段 sections 的 JSON）、CommentTemplate（评语模板库）、StudentComment（评语，student_id+term 唯一，重生成走更新）。反思对考试**不建外键**，考试删了历史反思仍留档。
+  - 评语逐人调主模型（N 学生 N 请求），不做一次全班 JSON：更稳、不串号、不超输出；代价是慢，界面给进度条和耗时预估。服务层只组装单生数据文本+落库，批量循环在页面，保证离线 mock 可测。
+  - 反思数据文本 = exam_service.analyze_exam 指标（单科+总分均分/及格率/优秀率/进退步人数）+ 自建 collect_homework_errors（按时间窗聚合 HomeworkAnswer 的错误类型分布和高频错题 TOP5）。评语数据文本复用画像口径（层次/趋势/强弱科/历次成绩）+ 错题薄弱知识点。
+  - 备份只用标准库 zipfile：zip 根放 backup_manifest.json，排除 *.lock/*.db-journal 和 data/backups/*.zip。恢复先校验（is_zipfile+testzip+清单+zip-slip 路径），再把 data 改名 data.bak-时间戳，解包失败 rmtree 半成品并改回；恢复前 dispose db.engine + gc.collect 释放 Windows 文件占用。清空按外键依赖顺序 DELETE 13 张业务表，不碰 llm_config.json/Key/备份 zip。
+  - 新建考试补 st.dialog 弹窗与作业弹窗统一；备课保持页内表单。
+- 踩坑（2026-09-19）：
+  - **Streamlit text_area/text_input 一旦给了固定 key，value= 只在首次渲染生效**；把生成内容存进自定义 dict（comment_drafts）后 rerun，带 key 的框仍以 session_state[key] 旧值（空）为准，导致“success 显示成功但框是空的”。解法：不给 key、用唯一 label（评语框 label 用 评语_{student.id} + label_visibility=collapsed），value= 每帧生效，老师当帧手改也能读到。
+  - AppTest 想在**不碰真实 data/database.db** 的前提下跑空库/有数据：from_string 里 runpy.run_path(app.py) 跑 UI，并在脚本内把 utils.db.engine/SessionLocal 和四个 modules 已绑定的 SessionLocal 全部替换成临时 sqlite 引擎（只换 db.engine 不够，modules 在 import 时 from utils.db import SessionLocal 已绑定旧值）。from_string 里直接 import app 不行（rerun 不重新执行模块体，切 tab 无 tabs）。from_function 在 stdin 脚本里报 OSError: could not get source code，只能用 from_file 或 from_string。
+  - 往测试文件追加大段含三单引号的 Python 代码，别用外层 r'''...''' 包（内嵌 ''' 提前截断）；用 PowerShell here-string 写临时文件再 Python 读回拼接最稳。
+  - 本机 GBK 控制台 print emoji/生僻字会崩，调试脚本一律设 PYTHONIOENCODING=utf-8，或把结果写 data/*.txt 用 Get-Content -Encoding UTF8 看。
+
+## 阶段3（v0.4 作业工作台）新增
+- 架构决策（2026-09-18）：
+  - 第 10 张表 HomeworkAnswer（作业每题作答，homework+student+question 唯一）是题目正确率/高频错题/错题本的唯一数据源；错题本就是 is_correct=False 的查询视图，不另建错题表；"典型错题"按全班该题错误率≥40% 实时算，不落标记。Homework 加 is_template，模板与普通作业同表，成绩/分析只选非模板。
+  - 自动组卷走"规则确定性抽题为主、AI 补缺口"：plan_paper_slots 按题型题量×难度配比展开槽位（余数补给占比最大的难度），deterministic_pick 从已审核题按 id 升序不放回抽，精确难度没有时同题型相邻难度兜底，仍缺的槽位才调 chat_content 补题；AI 失败保留规则结果不整体失败。
+  - 新建作业/试卷用 st.dialog 弹窗（Streamlit 1.64 原生支持，无新依赖），5 类型 emoji 网格 + 选中 type=primary 蓝色高亮，DEFAULT_PARAMS 存各类型默认题量/时长/总分。作业主体编辑仍在页内 4 tab。
+  - 作业总分 Excel 导入直接复用阶段1 excel_handler.detect_score_columns（姓名+第一个数字分数列）；每题得分只做页面逐题批改，不做每题 Excel 导入（文档第一版只录总分）。
+  - 作业页 4 tab：作业管理 / 成绩录入 / 作业分析 / 错题本；分析 AI 总结走主模型 chat，组卷补题和即时出题走内容模型 chat_content。
+- 踩坑（2026-09-18）：
+  - SQLAlchemy 会话 with 块结束后对象变 detached，页面里再访问 len(hw.questions) 懒加载会抛 DetachedInstanceError——列表页要在 with 内把渲染字段（如题数 len(hw.questions)）物化成普通 dict/list 再出会话用。
+  - session.query 传的是模型类本身，写 session.query(type(SomeModel())) 会把 DeclarativeMeta 再包一层报 ArgumentError；直接 session.query(HomeworkAnswer)。
+  - AppTest 对 st.dialog 没有专门 at.dialog 属性，弹窗打开后类型按钮就是普通 at.button（按 label 找"课前预习/试卷出题"等），点 .click().run() 即可断言；探针脚本打印 emoji 前要设 PYTHONIOENCODING=utf-8，否则 GBK 控制台崩（应用本身没异常）。
+
+## 阶段2（v0.3 备课工作台+题库）新增
+- 架构决策（2026-09-18）：
+  - 备课页用页内 5 个 st.tabs（资料/AI备课/AI出题/题库/PPT），不用文档原写的 sidebar 子导航——全局侧边栏已被 4 主导航占用。
+  - LLM 配置扩成三组存 data/llm_config.json：主模型（学情分析）、内容模型 content_base_url/content_model（教案/出题，留空回退主模型）、embedding embed_base_url/embed_model；Key 共用一个走 keyring。
+  - 课本检索三级降级：云端 embedding（火山方舟 OpenAI 兼容）→ Chroma 默认本地 ONNX → 纯关键词重叠；每份资料一 collection（名 textbook_{id}），提取全文另存 data/uploads/text/{id}.txt 供关键词兜底和预览。
+  - 检索片段当 user 消息数据注入，不拼 system prompt；提示词放 prompts/，严格要求 JSON（教案对象/题目数组）、公式 LaTeX、题目 answer 必填。
+  - PPT 离线确定性生成（不调模型）：封面→目标→5 环节（内容多分页），每页 ≤5 要点每条 ≤20 字截断，白底深蓝 #1F4E79。
+  - 不新增数据表（复用 Textbook/LessonPlan/Question），不新增第三方依赖。
+- 踩坑（2026-09-18）：
+  - **PyMuPDF 1.28 的 pymupdf.open() 不再接受裸 bytes**，传 bytes 报 "bad filename"；必须 open(stream=io.BytesIO(b), filetype="pdf")。真实上传 PDF 会走这条路径，被测试 test_extract_pdf_roundtrip 抓出来。
+  - python-pptx 设文字颜色/字号要落在 run 上（paragraph.add_run() 再 run.font.color.rgb），只设 paragraph.font 存不出 rPr，重开读 run.font.color.rgb 会抛 _NoneColor AttributeError。
+  - 题型别名表一开始漏了"单选题"（只有"单选/单项选择题"），模糊匹配归到了 solution；别名要把常见全称、简称都列全。
+  - AppTest 里 st.info/st.warning/st.success 各自是 at.info/at.warning/at.success，不在 at.markdown；空状态引导用 st.info 写时断言要查 at.info。
+  - PowerShell here-string 写超长文件会撞 Windows CreateProcess 命令行长度上限（错误码 206）；大文件拆成多次 AppendAllText 分段写。
+  - pytest 控制台中文在本机 GBK 下显示乱码，但不影响断言；比较一律用源码里的中文字符串字面量即可。
+
+## 阶段1（v0.2 学情工作台）新增
+- 架构决策（2026-09-18）：
+  - 分四层：modules（界面）/ utils.stats（纯统计，不依赖 streamlit 和 db）/ utils.excel_handler（纯表格识别）/ utils.student_service、exam_service（收外部 session 的 DB 操作）/ llm_client（模型+密钥）。测试主要打 stats 和 service 两层，不依赖界面。
+  - 统计口径写死在 stats.py：并列同名次竞赛排名(1,1,3)、及格60%优秀85%、分数段按满分比例、雷达图按得分率、进退步只比日期相邻两场。
+  - API Key 用 keyring 存 Windows 凭据管理器（服务名 math-ai-teacher）；Base URL/模型名存 data/llm_config.json。
+  - 旧库升级不引 Alembic：utils/db.py 的 _PENDING_COLUMNS 登记新可空列，启动时缺列就 ALTER TABLE ADD。
+  - Score 一行=一学生一考试一科；总分/总排名查询时聚合不落库；class_rank 按同考试同科同班。
+- 踩坑（2026-09-18）：
+  - 空库 AppTest 冒烟覆盖不到"有数据才执行到"的代码分支——help= 写成形参 help_text 不匹配、只在有成绩时才走到。以后 UI 冒烟要跑空库+有数据两条路径。
+  - Streamlit 1.64 弃用 use_container_width，统一改 width="stretch"。
+  - AppTest 没有 at.write；st.write 内容断言不到，断言要落在 markdown/metric/subheader/具体组件上。
+  - scripts/ 下的脚本要 sys.path.insert 项目根才能 import config（Path 已先行导入）。
+## 架构决策
+- 2026-09-18：项目放在 `D:\Codex\Project_03_AI数学教师工作台`（遵循工作区 Project_NN 命名），开发指令里的 `math-ai-teacher` 作为逻辑名不另建目录层，app.py 直接在项目根。
+- 2026-09-18：独立 conda 环境 math_teacher（Python 3.11），不污染 base；12 个核心依赖阶段 0 一次装齐。
+- 2026-09-18：9 张表字段严格按开发指令第三章；JSON 字段用 Text 存字符串；题库无独立侧边栏页，阶段 2 挂备课页内。
+
+## 设计取舍
+- 阶段 0 只建实际用到的文件（question_bank.py、其余 utils、prompts/、.env.example 延后到阶段 2/3），不造空壳。
+- 版本快照用 PowerShell 复制到 versions/，不依赖 git tag；D:\Codex 是统一 git 仓库，只 add 本项目路径。
+- Score 加唯一约束 (exam_id, student_id, subject) 防重复导入；Question.answer NOT NULL 落库强制。
+
+## 踩坑记录
+- 2026-09-18：沙箱内无法创建 conda 环境（envs 目录不可写）也无法访问 pypi.org，需提权执行 conda create / pip install。
+
+- 2026-09-18：直连 pypi.org 装依赖卡 10 分钟几乎无进展；换清华镜像 `-i https://pypi.tuna.tsinghua.edu.cn/simple` 后约 4 分钟装完全部。以后本机 pip 默认走清华镜像。
+- 2026-09-18：根仓库 `.gitignore` 用 `Project_*/` 忽略所有子项目——子项目一律在自身目录 `git init` 建独立仓库，不要往 D:\Codex 根仓库提交。
+- 2026-09-18：`conda run -n math_teacher python xxx.py` 回显含中文时会触发 conda 自身 GBK 崩溃；直接用 `C:\Users\zyx\.conda\envs\math_teacher\python.exe` 运行，脚本放项目根（自动在模块搜索路径）。
+- 2026-09-18：本机没装 Chrome，Edge headless 在沙箱里 GPU 进程崩溃无法截图；Streamlit 页面验证改用官方无头框架 `streamlit.testing.v1.AppTest`（from_file + 模拟 radio 切换 + 断言 at.exception），比截图可靠。
+
+## 我的纠正（用户反馈）
+-
+
+## 重要外部资源
+- 需求文档：C:\Users\zyx\Doubao\chats\2026-09-18\new-chat\AI数学教师工作台_开发指令.md
+
