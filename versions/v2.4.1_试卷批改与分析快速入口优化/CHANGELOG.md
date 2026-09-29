@@ -17,7 +17,7 @@
 ### 测试
 - 新增 `tests/test_v241.py`（8 个用例）：homework_id 列可空、get-or-create 幂等、改名、类型筛选、空态、快速入口出现条件、自动选中消费、试卷入口。
 - 同步旧测试对批改页的断言（选择器 key 改 grading_pick_idx、预选改 hw_open_id、标签计数口径）；不新增运行时 JSON，`_isolated_app_code()` 不改。
-- 全量结果：**FINAL_PASSED passed / FINAL_FAILED failed**（按全量实际结果填写）；`tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，继续单独标注、不算回归。
+- 全量结果（实际）：**1026 passed / 1 failed**；唯一失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 为历史预存失败，继续单独标注、不算回归。
 - 全量编译：`python -m compileall app.py config.py modules api utils tests scripts migrations` 通过。
 
 ### 取舍

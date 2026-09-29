@@ -446,6 +446,7 @@ def test_smart_compose_matrix_template_history_and_confirm_apptest(tmp_path):
 
 
 def test_scores_analysis_and_wrong_book_apptest(tmp_path):
+    """v2.4.1：成绩导入在批改标签、阈值控件在分析标签，选择器共享。"""
     from tests import test_app_smoke as smoke
     from streamlit.testing.v1 import AppTest
 
@@ -453,20 +454,21 @@ def test_scores_analysis_and_wrong_book_apptest(tmp_path):
     smoke._seed_homework_data_db(db_file)
     at = AppTest.from_string(_app_code(db_file, tmp_path), default_timeout=30)
     _open_homework(at)
-    goto_sub(at, "homework_tab", "成绩录入", "📝 学业测评")
+    # 进入批改与分析页，候选含种子物理作业，自动选中它。
+    goto_sub(at, "homework_tab", "✏️ 批改与分析", "📝 学业测评")
     assert not at.exception
 
-    # 成绩 CSV 导入。
-    at.file_uploader[0].upload(
+    # 成绩 CSV 导入（作业批改标签内的总分导入）。
+    # _import_total_scores 的上传框未设 key；批改页内它是唯一无 key 的 uploader。
+    uploader = next(x for x in at.file_uploader if x.key is None)
+    uploader.upload(
         "成绩.csv", "姓名,分数\n冒烟学生,95\n".encode("utf-8"),
         "text/csv").run()
     next(b for b in at.button if b.key == "import_hw_score").click().run()
     assert not at.exception
     assert any(str(x.value) in {"95", "95.0"} for x in at.metric)
 
-    # 作业分析：种子数据是物理作业。
-    goto_sub(at, "homework_tab", "作业分析", "📝 学业测评")
-    next(x for x in at.selectbox if x.key == "homework_analysis_subject").set_value("物理").run()
+    # 批改分析标签：分数阈值控件仍在（无需切学科，选择器已选中物理作业）。
     assert any(x.key == "hw_pass_line_1" for x in at.number_input)
     assert any(x.key == "hw_excellent_line_1" for x in at.number_input)
     assert any(x.key == "rank_excel_1" for x in at.download_button)

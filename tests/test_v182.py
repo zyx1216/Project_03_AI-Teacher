@@ -155,7 +155,7 @@ def test_direct_buttons_navigate(tmp_path):
 @pytest.mark.parametrize("sub_key,sub_value,top,marker", [
     ("lesson_plan_tab", "AI 备课", "📚 备课", "AI 备课"),
     ("lesson_plan_tab", "题库管理", "📚 备课", "题库里还没有"),
-    ("homework_tab", "作业分析", "📝 学业测评", "作业分析"),
+    ("homework_tab", "✏️ 批改与分析", "📝 学业测评", "✏️ 批改与分析"),
     ("homework_tab", "📜 历史记录", "📝 学业测评", "暂无历史记录"),
     ("analysis_tab", "学生管理", "📊 学情", "学生管理"),
     ("analysis_tab", "🧠 知识图谱", "📊 学情", "知识图谱"),
