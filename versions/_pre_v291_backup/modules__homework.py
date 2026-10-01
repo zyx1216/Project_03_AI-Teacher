@@ -1,0 +1,3786 @@
+# -*- coding: utf-8 -*-
+"""
+学业测评页面（v1.7.8）。
+
+学业测评包含 6 个主标签页：
+1. 作业管理：新建和编辑进行中的日常作业；
+2. 智能组卷：独立生成试卷，草稿预览确认后创建正式试卷；
+3. 成绩录入：Excel/CSV 导入总分、手动录分、逐题批改；
+4. 作业分析：概览指标、分数段、排名、进退步、AI 总结；
+5. 错题本：自动收集错题、筛选、重做和导出；
+6. 历史记录：统一管理所有已完成的日常作业和试卷。
+
+本文件只管界面；逻辑在 utils/homework_service.py、homework_score_service.py、
+homework_stats.py，统计口径复用 utils/stats.py。
+"""
+
+import json
+from datetime import datetime
+import re
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+import config
+from models.models import (Homework, HomeworkAnswer, HomeworkScore,
+                            Question, Textbook)
+from utils.db import SessionLocal
+from utils import llm_client, feature_subjects as fs
+from utils import agent_context
+from utils.app_config import (
+    SUBJECT_NAMES, DEFAULT_SUBJECT, DISPLAY_GRADE_CHOICES,
+    to_storage_grade, to_display_grade,
+)
+from utils import stats as stats_mod
+from utils import full_score_service
+from utils import excel_handler as eh
+from utils import student_service as student_svc
+from utils import question_service as qs
+from utils import question_importer as qi
+from utils import homework_service as hw_svc
+from utils import homework_score_service as hscore
+from utils import exam_service as es
+from utils import smart_compose_service as scs
+from utils.navigation import goto_group
+from utils import homework_submit_service as submit_svc
+from utils import homework_stats as hstat
+from utils import review_service
+from utils import tiered_homework_service
+from utils import score_doc_parser as sdp
+
+PROMPTS_DIR = Path(config.BASE_DIR) / "prompts"
+
+TYPE_LABELS = {"choice": "选择题", "fill": "填空题", "judge": "判断题", "solution": "解答题"}
+DIFF_LABELS = {1: "基础", 2: "中等", 3: "拓展"}
+DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+# 弹窗里 4 种日常作业类型；试卷只能从“智能组卷”独立入口创建。
+_TYPE_KEYS = ["preview", "classroom", "after_class", "review"]
+_TYPE_OPTION_LABELS = {
+    k: f"{hw_svc.type_emoji(k)} {hw_svc.type_label(k)}" for k in _TYPE_KEYS}
+
+SMART_COMPOSE_DRAFT_PREFIX = "__smart_compose_draft__"
+
+
+def _remember_subject(key: str) -> None:
+    """功能级学科选择器变化时立即持久化。"""
+    fs.set_feature_subject(key, st.session_state[key])
+
+
+def _sync_context(**kwargs) -> None:
+    """只把明确非空字段同步到 AI 上下文。"""
+    patch = {k: v for k, v in kwargs.items() if str(v or "").strip()}
+    if patch:
+        try:
+            agent_context.update_context(**patch)
+        except (ValueError, OSError):
+            pass
+
+
+def _subject_selectbox(key: str, caption: str | None = None) -> str:
+    """固定 key 的学科选择器，各作业功能互不影响。"""
+    current = fs.get_feature_subject(key)
+    value = st.selectbox(
+        "学科", SUBJECT_NAMES,
+        index=SUBJECT_NAMES.index(current) if current in SUBJECT_NAMES else 1,
+        key=key, on_change=_remember_subject, args=(key,))
+    if caption:
+        st.caption(caption)
+    return value
+
+
+def _render_math(text: str):
+    """安全渲染文本：转义所有可能导致React错误的字符。
+    处理：$...$公式、HTML特殊字符、反引号、连续换行等。
+    """
+    if not text:
+        st.markdown("—")
+        return
+    import re as _re
+    # 1. 把$...$公式换成纯文本（去掉$符号，避免LaTeX渲染错误）
+    text = _re.sub(r"\$([^$]+)\$", r"\1", text)
+    # 2. 转义HTML特殊字符
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    # 3. 把反引号转义（避免破坏代码格式）
+    text = text.replace("`", "\`")
+    # 4. 把连续多个换行符换成markdown换行
+    text = _re.sub(r"\n{2,}", "  \n", text)
+    st.markdown(text)
+
+
+def _read_prompt(filename: str) -> str:
+    return (PROMPTS_DIR / filename).read_text(encoding="utf-8")
+
+# ---------------------------------------------------------------------------
+# 新建日常作业弹窗
+# ---------------------------------------------------------------------------
+
+def _choose_new_homework_type(hw_type: str):
+    """类型按钮回调（普通函数，不要加 @st.dialog，否则点类型会弹一个空窗）。"""
+    st.session_state["hw_new_type"] = hw_type
+    # 换一次控件 key：新类型首次渲染用自己的默认值，也避开状态冲突警告。
+    st.session_state["hw_new_dialog_nonce"] = st.session_state.get(
+        "hw_new_dialog_nonce", 0) + 1
+
+
+@st.dialog("新建作业", width="large")
+def _new_homework_dialog():
+    """真正的弹窗内容：选日常作业类型（emoji 网格）→ 填参数 → 可选模板 → 创建。"""
+    st.markdown("**选择作业类型**")
+    cols = st.columns(4)
+    hw_type = st.session_state.get("hw_new_type", "after_class")
+    for i, key in enumerate(_TYPE_KEYS):
+        active = key == hw_type
+        # 不能在按钮返回 True 后手动 st.rerun()：那会造成整页卸载、弹窗重挂。
+        # on_click 会在本次弹窗局部重跑前执行，刚好让新类型参与本轮渲染。
+        cols[i].button(
+            _TYPE_OPTION_LABELS[key], key=f"type_btn_{key}",
+            use_container_width=True, type=("primary" if active else "secondary"),
+            on_click=_choose_new_homework_type, args=(key,))
+
+    dialog_subject = _subject_selectbox(
+        fs.HOMEWORK_NEW_SUBJECT, caption="新作业学科，不影响下方作业列表的筛选。")
+    dialog_grade = st.selectbox(
+        "年级", DISPLAY_GRADE_CHOICES, index=0, key="hw_new_grade")
+
+    # v1.7.9：关联资料和章节，选章节后自动填充作业名
+    from models.models import Textbook
+    storage_grade = to_storage_grade(dialog_grade)
+    with SessionLocal() as session:
+        query = session.query(Textbook).filter(
+            (Textbook.subject == dialog_subject) | Textbook.subject.is_(None))
+        if storage_grade:
+            query = query.filter(
+                (Textbook.grade == storage_grade) | Textbook.grade.is_(None))
+        books = query.order_by(Textbook.id.desc()).all()
+    book_options = [None] + [b.id for b in books]
+    book_labels = ["不关联资料"] + [b.name for b in books]
+    dialog_material = st.selectbox(
+        "关联资料（可选）", book_options,
+        format_func=lambda x: book_labels[book_options.index(x)],
+        key="hw_new_material",
+        help="选了资料后可选择章节，自动填充作业名")
+
+    chapter_titles = []
+    if dialog_material is not None:
+        from modules.lesson_plan import _load_material_chapter_titles
+        chapter_titles = _load_material_chapter_titles(dialog_material)
+    chapter_options = [None] + chapter_titles
+    dialog_chapter = st.selectbox(
+        "关联章节（可选）", chapter_options,
+        format_func=lambda x: "不选章节" if x is None else x,
+        key="hw_new_chapter",
+        disabled=dialog_material is None,
+        help="选了章节后自动填充作业名，可手动修改")
+
+    defaults = hw_svc.DEFAULT_PARAMS[hw_type]
+    nonce = st.session_state.get("hw_new_dialog_nonce", 0)
+    with st.form("new_homework_form"):
+        # v1.7.9：选了章节后自动填充作业名
+        auto_name = ""
+        if dialog_chapter:
+            auto_name = f"{dialog_chapter}·{hw_svc.type_label(hw_type)}"
+        name = st.text_input("作业名称 *", value=auto_name,
+                             placeholder=f"如：{hw_svc.type_label(hw_type)}·一元二次方程")
+        c1, c2, c3 = st.columns(3)
+        class_name = c1.text_input("适用班级")
+        # key 带类型：切换作业类型时，总分和用时立刻换成该类型的默认值。
+        total_score = c2.number_input(
+            "总分", min_value=1.0, value=float(defaults["total_score"]), step=5.0,
+            key=f"new_hw_total_{hw_type}_{nonce}")
+        duration = c3.number_input(
+            "建议用时（分钟）", min_value=1, value=int(defaults["duration"]), step=5,
+            key=f"new_hw_duration_{hw_type}_{nonce}")
+        remark = st.text_input("说明（可选）")
+        # v1.7.8：截止时间，到点自动标记完成
+        due_date = st.date_input(
+            "截止时间（可选，到点自动标记完成）",
+            value=None, key=f"new_hw_due_{nonce}")
+
+        with SessionLocal() as session:
+            templates = hw_svc.list_homeworks(
+                session, templates=True, subject=dialog_subject)
+            templates = [
+                item for item in templates
+                if not item.name.startswith(SMART_COMPOSE_DRAFT_PREFIX)
+            ]
+        template_id = None
+        if templates:
+            tpl_labels = ["不使用模板（空白作业）"] + [
+                f"{t.name}（{len(t.questions)} 题）" for t in templates]
+            tpl_idx = st.selectbox("从模板复制题目", range(len(tpl_labels)),
+                                   format_func=lambda i: tpl_labels[i])
+            if tpl_idx > 0:
+                template_id = templates[tpl_idx - 1].id
+
+        cc1, cc2 = st.columns(2)
+        submitted = cc1.form_submit_button("创建", type="primary", use_container_width=True)
+        cancelled = cc2.form_submit_button("取消", use_container_width=True)
+
+    if submitted:
+        if not name.strip():
+            st.error("请填写作业名称。")
+        else:
+            basket_note = ""
+            with SessionLocal() as session:
+                hw = hw_svc.create_homework(
+                    session, name, homework_type=hw_type,
+                    class_name=class_name.strip() or None,
+                    total_score=total_score, duration=duration,
+                    remark=remark.strip() or None, template_id=template_id,
+                    subject=dialog_subject,
+                    grade=to_storage_grade(dialog_grade),
+                    due_date=due_date,
+                    material_id=dialog_material,
+                    chapter=dialog_chapter)
+                # 题篮：只把与新作业同学科的题带入末尾。
+                basket = list(st.session_state.get("next_hw_question_basket", []))
+                if basket:
+                    same_subject_ids = []
+                    other_subjects = set()
+                    for qid in dict.fromkeys(basket):
+                        q = session.get(Question, int(qid))
+                        if q is None:
+                            continue
+                        if (q.subject or DEFAULT_SUBJECT) == dialog_subject:
+                            same_subject_ids.append(q.id)
+                        else:
+                            other_subjects.add(q.subject or DEFAULT_SUBJECT)
+                    if same_subject_ids:
+                        hw_svc.add_questions(session, hw.id, same_subject_ids)
+                    if other_subjects:
+                        basket_note = (
+                            f"题篮含 {'、'.join(sorted(other_subjects))} 学科的题，"
+                            f"请把新作业学科切到该学科后再建，本次未带入、题篮保留。")
+                    else:
+                        st.session_state["next_hw_question_basket"] = []
+                # 无论有没有题篮都要提交，否则作业会随会话关闭回滚。
+                session.commit()
+                new_id = hw.id
+            if basket_note:
+                st.session_state["hw_new_basket_note"] = basket_note
+            _sync_context(subject=dialog_subject,
+                          grade=dialog_grade,
+                          class_name=class_name.strip(),
+                          current_chapter=dialog_chapter,
+                          last_action="新建作业")
+            st.session_state["hw_open_id"] = new_id
+            close_new_homework_dialog_state()
+            st.rerun()
+    if cancelled:
+        close_new_homework_dialog_state()
+        st.rerun()
+
+def close_new_homework_dialog_state() -> None:
+    """关闭新建弹窗并清掉类型、总分、用时状态，下次打开重新取默认值。
+
+    主导航切离作业页时也调用：弹窗开关只是临时 UI 状态，不能跨页面残留。
+    """
+    st.session_state.pop("hw_new_dialog_open", None)
+    st.session_state.pop("hw_new_type", None)
+    st.session_state.pop("hw_new_grade", None)
+    st.session_state.pop("hw_new_dialog_nonce", None)
+    for key in list(st.session_state.keys()):
+        if key.startswith("new_hw_total_") or key.startswith("new_hw_duration_"):
+            st.session_state.pop(key, None)
+
+# ---------------------------------------------------------------------------
+# Tab 1：作业管理
+# ---------------------------------------------------------------------------
+
+def _auto_complete_expired():
+    """v1.7.8：自动检查过期作业，到截止时间的pending作业标记为completed。"""
+    from datetime import datetime
+    now = datetime.now()
+    with SessionLocal() as session:
+        expired = (session.query(Homework)
+                   .filter(Homework.status == "pending")
+                   .filter(Homework.due_date.isnot(None))
+                   .filter(Homework.due_date < now)
+                   .filter(Homework.is_template.is_(False))
+                   .all())
+        for hw in expired:
+            hw_svc.mark_homework_completed(session, hw.id)
+        if expired:
+            st.toast(f"已自动完成 {len(expired)} 份过期作业", icon="⏰")
+
+
+def tab_manage():
+    """作业管理：进行中（新建/编辑/布置）/ 已完成（原历史记录）。"""
+    st.subheader("作业管理")
+    state = st.radio(
+        "作业状态", ["进行中", "已完成"], horizontal=True,
+        key="homework_state_mode")
+    if state == "已完成":
+        _manage_history()
+    else:
+        _manage_active()
+
+
+def _manage_active():
+    # v1.7.8：自动检查过期作业，到截止时间的pending作业自动标记完成
+    _auto_complete_expired()
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        if st.button("➕ 新建作业", type="primary"):
+            st.session_state["hw_new_dialog_open"] = True
+    with c2:
+        _subject_selectbox(fs.HOMEWORK_LIST_SUBJECT, caption="仅筛选作业和模板列表。")
+        _sync_context(subject=fs.get_feature_subject(fs.HOMEWORK_LIST_SUBJECT))
+    # 不能只在按钮点击当帧调用弹窗：弹窗内切换类型会 rerun，导致弹窗消失。
+    if st.session_state.get("hw_new_dialog_open"):
+        _new_homework_dialog()
+
+    open_id = st.session_state.get("hw_open_id")
+    if open_id is not None:
+        _homework_editor(open_id)
+        st.divider()
+    _homework_list()
+    # v1.8.0：点击 ✅ 完成后弹教学反思 dialog
+    _personalized_homework_panel()
+    pending_finish_id = st.session_state.pop("hw_finish_dialog_id", None)
+    if pending_finish_id is not None:
+        _complete_with_reflection_dialog(pending_finish_id)
+    grading_id = st.session_state.get("grading_dialog_id")
+    if grading_id is not None:
+        _grading_dialog(grading_id)
+
+def _homework_list():
+    """日常作业列表：只显示进行中作业，支持筛选、批量操作。"""
+    current_subject = fs.get_feature_subject(fs.HOMEWORK_LIST_SUBJECT)
+    last_batch = st.session_state.pop("hw_batch_last", None)
+    if last_batch:
+        st.toast(last_batch)
+    basket_note = st.session_state.pop("hw_new_basket_note", None)
+    if basket_note:
+        st.warning(basket_note)
+
+    with SessionLocal() as session:
+        classes = hw_svc.list_homework_classes(session, subject=current_subject)
+
+    with st.container(border=True):
+        fc1, fc2, fc3, fc4, fc5 = st.columns(5)
+        keyword = fc1.text_input("作业名称搜索", key="homework_filter_keyword")
+        type_options = [None] + _TYPE_KEYS
+        homework_type = fc2.selectbox(
+            "作业类型", type_options,
+            format_func=lambda x: "全部类型" if x is None else hw_svc.type_label(x),
+            key="homework_filter_type")
+        grade_filter = fc3.selectbox(
+            "年级", ["全部年级"] + DISPLAY_GRADE_CHOICES,
+            key="homework_filter_grade")
+        class_filter = fc4.selectbox(
+            "班级", ["全部班级"] + classes, key="homework_filter_class")
+        sort_label = fc5.selectbox(
+            "排序", ["最新创建", "最旧创建", "最近打开"],
+            key="homework_filter_sort")
+
+    sort_map = {
+        "最新创建": "created_desc",
+        "最旧创建": "created_asc",
+        "最近打开": "opened_desc",
+    }
+    storage_grade = None if grade_filter == "全部年级" else to_storage_grade(grade_filter)
+    with SessionLocal() as session:
+        homeworks = hw_svc.list_homeworks(
+            session, templates=False, subject=current_subject,
+            keyword=keyword.strip() or None, homework_type=homework_type,
+            grade=storage_grade, status="pending", exclude_types=["exam"],
+            class_name=None if class_filter == "全部班级" else class_filter,
+            sort_order=sort_map[sort_label])
+        templates = hw_svc.list_homeworks(
+            session, templates=True, subject=current_subject)
+        templates = [t for t in templates
+                     if not t.name.startswith(SMART_COMPOSE_DRAFT_PREFIX)]
+        items = [{
+            "id": h.id, "name": h.name, "subject": h.subject, "class_name": h.class_name,
+            "type": h.homework_type, "n": len(h.questions),
+            "total": h.total_score or 0, "duration": h.duration or 0,
+            "due_date": h.due_date, "grade": h.grade,
+            "material_id": h.material_id, "chapter": h.chapter,
+        } for h in homeworks]
+        tpl_items = [{
+            "name": t.name, "type": t.homework_type, "n": len(t.questions),
+            "grade": t.grade,
+        } for t in templates]
+
+    basket = st.session_state.get("next_hw_question_basket", [])
+    if basket:
+        bc1, bc2 = st.columns([4, 1])
+        bc1.caption(f"🧺 题篮：{len(basket)} 道题待带入新作业（仅带入同学科作业）。")
+        if bc2.button("清空题篮", key="clear_basket_manage"):
+            st.session_state["next_hw_question_basket"] = []
+            st.rerun()
+
+    st.markdown(f"**📋 进行中（{len(items)} 份）**")
+    if not items:
+        st.info("还没有符合条件的进行中作业，点上方“新建作业”开始。")
+    for hw in items:
+        _render_homework_row(hw)
+
+    picked_ids = [hw["id"] for hw in items
+                  if st.session_state.get(f"pick_hw_{hw['id']}")]
+    if picked_ids:
+        bc1, bc2 = st.columns(2)
+        if bc1.button(f"🗑️ 批量删除所选（{len(picked_ids)}）",
+                      key="hw_batch_del_btn"):
+            st.session_state["hw_batch_delete_pending"] = picked_ids
+            st.rerun()
+        if bc2.button(f"📦 批量导出所选 Word（{len(picked_ids)}）",
+                      key="hw_batch_export_btn"):
+            with SessionLocal() as session:
+                zip_bytes = hw_svc.export_homeworks_zip(session, picked_ids)
+            st.download_button(
+                "⬇️ 下载批量 Word 压缩包", zip_bytes,
+                file_name="作业批量导出.zip",
+                mime="application/zip", key="hw_batch_export_dl")
+
+    if st.session_state.get("hw_batch_delete_pending"):
+        pending_ids = list(st.session_state["hw_batch_delete_pending"])
+        st.error(f"将删除勾选的 {len(pending_ids)} 份作业，其题目关联、成绩与作答一并删除。确定继续吗？")
+        bc1, bc2 = st.columns(2)
+        if bc1.button("✅ 确认批量删除", type="primary", key="hw_batch_del_ok"):
+            with SessionLocal() as session:
+                from utils import undo_service
+                for _hid in pending_ids:
+                    undo_service.record(
+                        session, "delete_homework",
+                        {"target": (Homework, _hid)},
+                        f"删除作业 #{_hid}")
+                deleted_n = hw_svc.delete_homeworks(session, pending_ids)
+                session.commit()
+            for pid in pending_ids:
+                st.session_state.pop(f"pick_hw_{pid}", None)
+                if st.session_state.get("hw_open_id") == pid:
+                    st.session_state.pop("hw_open_id", None)
+            st.session_state.pop("hw_batch_delete_pending", None)
+            st.session_state["hw_batch_last"] = f"已批量删除 {deleted_n} 份作业。"
+            st.rerun()
+        if bc2.button("取消", key="hw_batch_del_cancel"):
+            st.session_state.pop("hw_batch_delete_pending", None)
+            st.rerun()
+
+    if tpl_items:
+        st.markdown("**作业模板**")
+        for tpl in tpl_items:
+            st.caption(
+                f"📦 {tpl['name']}（{hw_svc.type_label(tpl['type'])}，"
+                f"{to_display_grade(tpl['grade']) or '未指定'}，{tpl['n']} 题）")
+
+
+@st.dialog("✅ 完成作业（含反思）")
+def _complete_with_reflection_dialog(hw_id: int):
+    """v1.8.0: 完成作业时弹窗让老师填反思，可选。“反思”复用 remark 字段。"""
+    key_refl = f"finish_refl_{hw_id}"
+    if key_refl not in st.session_state:
+        st.session_state[key_refl] = ""
+    refl = st.text_area(
+        "教学反思（可选）",
+        key=key_refl,
+        placeholder="可填写本次作业的教学得失与启发",
+        height=120,
+    )
+    cc1, cc2 = st.columns(2)
+    if cc1.button("✅ 保存反思", type="primary", key=f"finish_dialog_ok_{hw_id}"):
+        from database import SessionLocal
+        with SessionLocal() as session:
+            try:
+                if refl and refl.strip():
+                    hw_svc.update_homework(session, hw_id, remark=refl.strip())
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                st.error(f"保存反思失败：{exc}")
+                return
+        st.session_state.pop("hw_finish_dialog_id", None)
+        st.session_state.pop(key_refl, None)
+        st.toast("反思已保存。")
+        st.rerun()
+    if cc2.button("取消", key=f"finish_dialog_cancel_{hw_id}"):
+        st.session_state.pop("hw_finish_dialog_id", None)
+        st.session_state.pop(key_refl, None)
+        st.rerun()
+
+
+def _render_homework_row(hw: dict):
+    """渲染一行进行中作业及操作按钮（含批改/分析快速入口）。"""
+    hid = hw["id"]
+    with st.container(border=True):
+        c0, c1, cg, ca, c2, c3, c4, c5, c6 = st.columns(
+            [0.5, 3.2, 0.9, 0.9, 0.9, 0.9, 0.9, 0.7, 0.9])
+        c0.checkbox("选择", key=f"pick_hw_{hid}", label_visibility="collapsed")
+        due_raw = hw.get("due_date")
+        if due_raw:
+            due_dt = due_raw if isinstance(due_raw, datetime) else datetime.fromisoformat(str(due_raw))
+            is_overdue = due_dt < datetime.now()
+            due_str = f"📅 截止 {due_dt.strftime('%m-%d')}" + (" ⚠️" if is_overdue else "")
+        else:
+            due_str = ""
+        c1.markdown(
+            f"{hw_svc.type_emoji(hw['type'])} **{hw['name']}**　"
+            f"（{to_display_grade(hw['grade']) or '未指定'}）　"
+            f"{hw['class_name'] or ''}　{hw['n']} 题　"
+            f"满分 {hw['total']}　{hw['duration']} 分钟　{due_str}"
+            f"{'　📖 ' + hw['chapter'] if hw.get('chapter') else ''}")
+        if cg.button("✏️ 去批改", key=f"quick_grade_{hid}"):
+            goto_group("📝 学业测评", "✏️ 批改与分析", hw_open_id=hid)
+        if ca.button("📊 查看分析", key=f"quick_an_{hid}"):
+            with SessionLocal() as session:
+                has_score = (session.query(HomeworkScore)
+                             .filter(HomeworkScore.homework_id == hid)
+                             .count())
+                has_answer = (session.query(HomeworkAnswer)
+                              .filter(HomeworkAnswer.homework_id == hid)
+                              .count())
+            if not has_score and not has_answer:
+                st.info("请先完成批改。")
+            else:
+                goto_group("📝 学业测评", "✏️ 批改与分析", hw_open_id=hid)
+        _online_submit_panel(hid)
+        if c2.button("打开编辑", key=f"open_{hid}"):
+            with SessionLocal() as session:
+                hw_svc.touch_homework(session, hid)
+                session.commit()
+            st.session_state["hw_open_id"] = hid
+            _sync_context(subject=hw.get("subject"),
+                          grade=to_display_grade(hw.get("grade")),
+                          class_name=hw.get("class_name"),
+                          current_chapter=hw.get("chapter"),
+                          last_action="打开作业")
+            st.rerun()
+        if c3.button("📋 复制", key=f"copy_hw_{hid}"):
+            with SessionLocal() as session:
+                clone = hw_svc.duplicate_homework(session, hid)
+                session.commit()
+                new_id = clone.id
+            st.session_state["hw_open_id"] = new_id
+            st.toast(f"已复制为副本：{clone.name}")
+            st.rerun()
+        if c4.button("✅ 完成", key=f"finish_{hid}"):
+            with SessionLocal() as session:
+                hw_svc.mark_homework_completed(session, hid)
+                session.commit()
+            _sync_context(subject=hw.get("subject"),
+                          grade=to_display_grade(hw.get("grade")),
+                          class_name=hw.get("class_name"),
+                          last_action="完成作业")
+            st.session_state["hw_finish_dialog_id"] = hid
+            st.rerun()
+        if c6.button("📷 批改", key=f"grade_hw_{hid}"):
+            st.session_state["grading_dialog_id"] = hid
+        if c5.button("删除", key=f"del_hw_{hid}"):
+            st.session_state["confirm_del_hw"] = hid
+
+        if st.session_state.get("confirm_del_hw") == hid:
+            cc1, cc2 = st.columns(2)
+            if cc1.button("确认删除（含成绩与作答）", key=f"ok_del_hw_{hid}",
+                          type="primary"):
+                with SessionLocal() as session:
+                    hw_svc.delete_homework(session, hid)
+                    session.commit()
+                st.session_state.pop("confirm_del_hw", None)
+                st.session_state.pop(f"pick_hw_{hid}", None)
+                if st.session_state.get("hw_open_id") == hid:
+                    st.session_state.pop("hw_open_id", None)
+                st.rerun()
+            if cc2.button("取消", key=f"cancel_del_hw_{hid}"):
+                st.session_state.pop("confirm_del_hw", None)
+                st.rerun()
+def _online_submit_panel(hid: int):
+    """生成提交码、二维码，并查看学生在线提交情况。"""
+    with st.expander("📤 在线提交与批改"):
+        with SessionLocal() as session:
+            code = submit_svc.ensure_submit_code(session, hid)
+            session.commit()
+            url = f"http://localhost:8501/?code={code}"
+            c1, c2 = st.columns(2)
+            c1.write(f"提交码：`{code}`")
+            c1.write(f"提交链接：`{url}`")
+            c2.image(submit_svc.build_submit_qr_png(url), width=180)
+
+            submissions = submit_svc.list_submissions(session, hid)
+            stats = submit_svc.submission_stats(session, hid)
+            st.caption(
+                f"已交 {stats['submitted_count']} 人，"
+                f"客观题平均分：{stats['average_score'] if stats['average_score'] is not None else '—'}")
+            _objective_regrade_controls(session, hid)
+            _subjective_grading_panel(session, hid)
+            _plagiarism_panel(session, hid)
+            for row in submissions:
+                with st.container(border=True):
+                    st.markdown(
+                        f"**{row.student_name}**｜{row.submitted_at:%m-%d %H:%M}")
+                    answers = json.loads(row.answers_json or "{}")
+                    with st.expander("查看原始作答"):
+                        st.json(answers)
+                    mc1, mc2 = st.columns(2)
+                    new_score = mc1.number_input(
+                        "最终分数", min_value=0, max_value=100,
+                        value=int(row.score or 0),
+                        key=f"submission_score_{row.id}")
+                    new_feedback = mc2.text_input(
+                        "评语", value=row.feedback or "",
+                        key=f"submission_feedback_{row.id}")
+                    if st.button("💾 保存批改",
+                                 key=f"save_submission_{row.id}"):
+                        submit_svc.update_manual_grade(
+                            session, row.id, new_score, new_feedback)
+                        session.commit()
+                        st.rerun()
+
+def _homework_editor(homework_id: int):
+    """作业编辑抽屉：基本信息折叠区 + 4 个加题入口 + 调序/分值/导出。"""
+    with SessionLocal() as session:
+        hw = hw_svc.get_homework(session, homework_id)
+        if hw is None:
+            st.session_state.pop("hw_open_id", None)
+            st.rerun()
+            return
+
+        st.markdown(f"### {hw_svc.type_emoji(hw.homework_type)} {hw.name}")
+        _render_basic_info_expander(session, hw)
+        _render_lesson_origin(session, hw)
+        tabs = st.tabs(["从题库选题", "AI 即时出题", "外部导入", "手动添加"])
+        with tabs[0]:
+            _add_from_bank(session, hw)
+        with tabs[1]:
+            _add_from_ai(session, hw)
+        with tabs[2]:
+            _add_from_import(session, hw)
+        with tabs[3]:
+            _add_manual(session, hw)
+
+        _question_list_editor(session, hw)
+
+
+def _render_lesson_origin(session, hw):
+    """v1.9.0：作业来自教案时显示来源，点击跳到 AI 备课并载入该教案。"""
+    if not getattr(hw, "lesson_plan_id", None):
+        return
+    from models.models import LessonPlan
+    lesson = session.get(LessonPlan, hw.lesson_plan_id)
+    if lesson is None:
+        st.caption("来源教案已被删除。")
+        return
+    if st.button(f"🔗 来自教案：{lesson.title}",
+                 key=f"hw_origin_{hw.id}"):
+        goto_group("📚 备课", sub="AI 备课",
+                   pending_load_plan_id=lesson.id)
+
+
+def _render_basic_info_expander(session, hw):
+    """v1.8.0：作业基本信息编辑 expander，资料按学科+年级过滤。"""
+    from utils import material_service
+    materials = material_service.list_materials(
+        session, subject=hw.subject or DEFAULT_SUBJECT, grade=hw.grade)
+    mat_options = [(None, "不关联资料")] + [(m.id, m.name) for m in materials]
+    mat_ids = [m.id for m in materials]
+    mat_labels = [m.name for m in materials]
+    current_mat = hw.material_id if hw.material_id in mat_ids else None
+    with st.expander("📝 基本信息（点击展开修改）", expanded=False):
+        c1, c2 = st.columns(2)
+        new_name = c1.text_input("作业名称", value=hw.name, key=f"hw_basic_name_{hw.id}")
+        new_class = c2.text_input("适用班级", value=hw.class_name or "",
+                                   key=f"hw_basic_class_{hw.id}")
+        c3, c4, c5 = st.columns(3)
+        new_total = c3.number_input(
+            "总分", min_value=0.0,
+            value=float(hw.total_score or 100.0), step=1.0,
+            key=f"hw_basic_total_{hw.id}")
+        new_duration = c4.number_input(
+            "建议用时（分钟）", min_value=0,
+            value=int(hw.duration or 0), step=1,
+            key=f"hw_basic_duration_{hw.id}")
+        # st.datetime_input 不接受 None 当 value，所以用 today 兜底显示。
+        due_default = hw.due_date if hw.due_date else datetime.now()
+        new_due = c5.date_input(
+            "截止时间", value=due_default.date() if hasattr(due_default, "date") else due_default,
+            key=f"hw_basic_due_{hw.id}")
+        # 资料下拉（按学科+年级过滤）
+        new_mat = st.selectbox(
+            "关联资料", mat_options,
+            format_func=lambda opt: ("不关联资料" if opt[0] is None else opt[1]),
+            index=([o[0] for o in mat_options].index(current_mat)
+                   if current_mat is not None else 0),
+            key=f"hw_basic_material_{hw.id}")
+        # 章节从选中资料读取
+        chapter_titles = []
+        if new_mat[0] is not None:
+            book = session.get(Textbook, new_mat[0])
+            if book is not None:
+                chapter_titles = _smart_material_chapters(book)
+        chap_options = [None] + chapter_titles
+        try:
+            chap_index = chap_options.index(hw.chapter) if hw.chapter in chap_options else 0
+        except ValueError:
+            chap_index = 0
+        new_chapter = st.selectbox(
+            "关联章节", chap_options,
+            format_func=lambda x: ("不选章节" if x is None else x),
+            index=chap_index, key=f"hw_basic_chapter_{hw.id}",
+            disabled=new_mat[0] is None)
+        new_reflection = st.text_area(
+            "📝 教学反思", value=hw.remark or "",
+            key=f"hw_basic_refl_{hw.id}",
+            placeholder="可选，记录本次作业的教学反思")
+        if st.button("💾 保存基本信息", type="primary",
+                     key=f"hw_basic_save_{hw.id}"):
+            due_dt = (datetime.combine(new_due, datetime.min.time())
+                      if new_due else None)
+            try:
+                hw_svc.update_homework(
+                    session, hw.id,
+                    name=new_name.strip() or hw.name,
+                    class_name=(new_class.strip() or None),
+                    total_score=new_total,
+                    duration=new_duration,
+                    due_date=due_dt,
+                    material_id=new_mat[0],
+                    chapter=new_chapter,
+                    remark=(new_reflection.strip() or None))
+                session.commit()
+            except Exception as exc:
+                session.rollback()
+                st.error(f"保存失败：{exc}")
+                return
+            st.toast("基本信息已保存。")
+            st.rerun()
+
+def _add_from_bank(session, hw):
+    """从已审核题库按条件筛选，勾选加入当前作业。"""
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns(4)
+        ftype = c1.selectbox("题型", [None] + list(TYPE_LABELS),
+                             format_func=lambda x: "全部" if x is None else TYPE_LABELS[x],
+                             key=f"bank_type_{hw.id}")
+        fdiff = c2.selectbox("难度", [None, 1, 2, 3],
+                             format_func=lambda x: "全部" if x is None else DIFF_LABELS[x],
+                             key=f"bank_diff_{hw.id}")
+        keyword = c3.text_input("知识点/题干关键词", key=f"bank_kw_{hw.id}")
+        fgrade = c4.selectbox(
+            "年级", [None] + DISPLAY_GRADE_CHOICES,
+            format_func=lambda x: "全部年级" if x is None else x,
+            key=f"bank_grade_{hw.id}")
+        questions = qs.list_questions(session, question_type=ftype,
+                                      difficulty=fdiff, status="approved",
+                                      keyword=keyword.strip() or None,
+                                      subject=hw.subject or DEFAULT_SUBJECT,
+                                      grade=fgrade)
+        existing = hw_svc.question_ids_in_homework(session, hw.id)
+        choices = [q for q in questions if q.id not in existing]
+        st.caption(f"题库中可选 {len(choices)} 道（已在作业里的自动隐藏）")
+        if not choices:
+            st.info("没有符合条件且未加入的已审核题。")
+            return
+        labels = [f"#{q.id} {TYPE_LABELS[q.question_type]}·{DIFF_LABELS[q.difficulty]}"
+                  f"　{q.content[:30]}" for q in choices]
+        picked = st.multiselect("勾选要加入的题", range(len(choices)),
+                                format_func=lambda i: labels[i],
+                                key=f"bank_pick_{hw.id}")
+        if st.button("➕ 加入作业", key=f"bank_add_{hw.id}"):
+            ids = [choices[i].id for i in picked]
+            added = hw_svc.add_questions(session, hw.id, ids)
+            session.commit()
+            st.toast(f"已加入 {added} 道题。")
+            st.rerun()
+
+
+def _add_from_ai(session, hw):
+    """AI 即时出题：生成→校验→入库→加入作业（走待审核）。"""
+    with st.container(border=True):
+        knowledge = st.text_input("知识点", key=f"ai_kp_{hw.id}",
+                                  placeholder="如：根的判别式")
+        c1, c2, c3 = st.columns(3)
+        types = c1.multiselect("题型", list(TYPE_LABELS),
+                               format_func=lambda x: TYPE_LABELS[x],
+                               key=f"ai_types_{hw.id}")
+        difficulty = c2.select_slider("难度", options=[1, 2, 3],
+                                      format_func=lambda x: DIFF_LABELS[x],
+                                      value=2, key=f"ai_diff_{hw.id}")
+        count = c3.number_input("数量", min_value=1, max_value=10, value=5,
+                                key=f"ai_count_{hw.id}")
+        if st.button("🤖 生成并加入", key=f"ai_gen_{hw.id}", type="primary"):
+            if not knowledge.strip():
+                st.warning("请先填知识点。")
+            elif not llm_client.is_content_configured():
+                st.warning("还没配置内容生成模型，请到「⚙️ 设置」配置。")
+            else:
+                _generate_and_add(session, hw, knowledge.strip(), types,
+                                  difficulty, count)
+
+
+def _generate_and_add(session, hw, knowledge, types, difficulty, count):
+    """调内容模型出题，校验后入库并加入作业。"""
+    type_text = "、".join(TYPE_LABELS[t] for t in types) if types else "各种题型"
+    system_prompt = _read_prompt("question_prompt.txt")
+    subject = hw.subject or DEFAULT_SUBJECT
+    grade_text = to_display_grade(hw.grade) or "未指定"
+    user_text = (f"学科：{subject}\n年级：{grade_text}\n知识点：{knowledge}\n"
+                 f"题型：{type_text}\n难度：{DIFF_LABELS[difficulty]}\n"
+                 f"题目数量：恰好 {count} 道")
+    with st.status("AI 正在命题……", expanded=True) as status:
+        status.write("分析学科、年级、知识点和题型……")
+        try:
+            raw = llm_client.chat_content(system_prompt, user_text, temperature=0.8)
+        except (llm_client.LLMConfigError, llm_client.LLMCallError) as exc:
+            status.update(label="AI 出题失败", state="error")
+            st.error(f"生成失败：{exc}")
+            if st.button("🔄 重试", key="hw_ai_retry"):
+                _generate_and_add(session, hw, knowledge, types, difficulty, count)
+            return
+        status.write("校验题目和答案……")
+    valid, rejected = qs.build_questions(raw)
+    if not valid:
+        st.error("没解析出有效题目，请重试。")
+        if st.button("🔄 重试", key="hw_ai_retry"):
+            _generate_and_add(session, hw, knowledge, types, difficulty, count)
+        return
+    new_ids = []
+    for data in valid:
+        q = qs.create_question(session, data, source="ai_generated",
+                                       status="pending", subject=hw.subject or DEFAULT_SUBJECT)
+        new_ids.append(q.id)
+    session.flush()
+    added = hw_svc.add_questions(session, hw.id, new_ids)
+    session.commit()
+    msg = f"已生成并加入 {added} 道题（待审核状态）。"
+    if rejected:
+        msg += f" {rejected} 道因缺答案被拒收。"
+    st.toast(msg)
+    st.rerun()
+
+
+def _add_from_import(session, hw):
+    """把外部导入的题加入当前作业（导入题同样走校验，缺答案跳过）。"""
+    with st.container(border=True):
+        mode = st.radio("来源", ["Excel", "Word", "粘贴文本"], horizontal=True,
+                        key=f"imp_mode_{hw.id}", label_visibility="collapsed")
+        records = None
+        if mode in ("Excel", "Word"):
+            suffix = "xlsx" if mode == "Excel" else "docx"
+            up = st.file_uploader(f"选择 {suffix.upper()} 文件", type=[suffix],
+                                  key=f"imp_file_{hw.id}")
+            if up is not None and st.button("解析预览", key=f"imp_parse_file_{hw.id}"):
+                try:
+                    if mode == "Excel":
+                        df = pd.read_excel(up)
+                        detected = qi.detect_question_columns(df)
+                        for problem in detected["problems"]:
+                            st.error(problem)
+                        if detected["mapping"]["content"] and detected["mapping"]["answer"]:
+                            st.session_state[f"imp_records_{hw.id}"] = \
+                                qi.records_from_excel(df, detected["mapping"])
+                            st.rerun()
+                    else:
+                        st.session_state[f"imp_records_{hw.id}"] = \
+                            qi.records_from_docx(up.getvalue())
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"解析失败：{exc}")
+        else:
+            pasted = st.text_area("粘贴题目（用“答案：”标答案）", height=140,
+                                  key=f"imp_text_{hw.id}")
+            if st.button("解析预览", key=f"imp_parse_text_{hw.id}"):
+                st.session_state[f"imp_records_{hw.id}"] = qi.records_from_text(pasted)
+                st.rerun()
+
+        records = st.session_state.get(f"imp_records_{hw.id}")
+        if records:
+            bad = sum(1 for r in records if r.get("problems"))
+            if bad:
+                st.warning(f"{bad} 道缺题干/答案，导入时自动跳过。")
+            st.dataframe(pd.DataFrame([{
+                "题干": r["content"][:30], "答案": r["answer"][:20],
+                "问题": "、".join(r.get("problems", []))} for r in records]),
+                width="stretch", hide_index=True)
+            if st.button("✅ 确认导入并加入作业", key=f"imp_ok_{hw.id}", type="primary"):
+                result = qi.import_records(session, records, subject=hw.subject or DEFAULT_SUBJECT)
+                session.flush()
+                # import_records 新建的题按内容找回来加入作业
+                new_questions = (session.query(Question)
+                                 .filter(Question.source == "imported",
+                                         Question.status == "pending",
+                                         Question.subject == (hw.subject or DEFAULT_SUBJECT))
+                                 .order_by(Question.id.desc())
+                                 .limit(result["imported"]).all())
+                added = hw_svc.add_questions(session, hw.id, [q.id for q in new_questions])
+                session.commit()
+                st.toast(f"导入 {result['imported']} 道，{added} 道已加入作业，"
+                           f"跳过 {result['rejected']} 道。")
+                st.session_state.pop(f"imp_records_{hw.id}", None)
+                st.rerun()
+
+
+def _add_manual(session, hw):
+    """手动添加一道题（题干+答案必填），入库即已审核并加入作业。"""
+    with st.container(border=True):
+        with st.form(f"manual_q_{hw.id}"):
+            content = st.text_area("题干（公式用 $...$）", height=100)
+            c1, c2 = st.columns(2)
+            qtype = c1.selectbox("题型", list(TYPE_LABELS),
+                                 format_func=lambda x: TYPE_LABELS[x])
+            diff = c2.select_slider("难度", options=[1, 2, 3],
+                                    format_func=lambda x: DIFF_LABELS[x], value=2)
+            kps = st.text_input("知识点（逗号分隔）")
+            answer = st.text_area("答案（必填）", height=70)
+            analysis = st.text_area("解析（可选）", height=70)
+            submitted = st.form_submit_button("➕ 添加并加入", type="primary")
+        if submitted:
+            normalized = qs.validate_question({
+                "content": content, "question_type": qtype, "difficulty": diff,
+                "knowledge_points": kps, "answer": answer, "analysis": analysis})
+            if normalized is None:
+                st.error("题干和答案都不能为空。")
+            else:
+                q = qs.create_question(session, normalized, source="manual",
+                                       status="approved",
+                                       subject=hw.subject or DEFAULT_SUBJECT)
+                session.flush()
+                hw_svc.add_questions(session, hw.id, [q.id])
+                session.commit()
+                st.toast("已添加并加入作业。")
+                st.rerun()
+
+def _question_list_editor(session, hw):
+    """作业内题目清单：调序、改分值、移除、总分、预览、导出、存模板。"""
+    st.markdown("**作业题目**")
+    pairs = hw_svc.homework_questions(session, hw.id)
+    if not pairs:
+        st.info("还没有题目，用上面四个入口加题。")
+        return
+
+    summed = hw_svc.summed_score(session, hw.id)
+    st.caption(f"已设置分值合计：{summed} 分；作业登记满分：{hw.total_score or 0} 分。")
+
+    for idx, (link, q) in enumerate(pairs):
+        with st.container(border=True):
+            c1, c2, c3, c4, c5 = st.columns([5, 1.3, 1, 1, 1])
+            c1.markdown(f"{idx + 1}. {TYPE_LABELS[q.question_type]}·"
+                        f"{DIFF_LABELS[q.difficulty]}　{q.content[:40]}")
+            score = c2.number_input("分值", min_value=0.0, value=float(link.score or 0),
+                                    step=1.0, key=f"score_{hw.id}_{q.id}",
+                                    label_visibility="collapsed")
+            if c3.button("⬆️", key=f"up_{hw.id}_{q.id}", disabled=(idx == 0)):
+                hw_svc.move_question(session, hw.id, q.id, -1)
+                session.commit()
+                st.rerun()
+            if c4.button("⬇️", key=f"down_{hw.id}_{q.id}",
+                         disabled=(idx == len(pairs) - 1)):
+                hw_svc.move_question(session, hw.id, q.id, 1)
+                session.commit()
+                st.rerun()
+            if c5.button("移除", key=f"rm_{hw.id}_{q.id}"):
+                hw_svc.remove_question(session, hw.id, q.id)
+                session.commit()
+                st.rerun()
+            if float(link.score or 0) != score:
+                # 分值被改动时即时保存（下一次 rerun 生效）
+                hw_svc.set_question_score(session, hw.id, q.id, score or None)
+                session.commit()
+
+    with st.expander("👁️ 预览学生卷 / 教师卷"):
+        pc1, pc2 = st.columns(2)
+        if pc1.button("导出学生卷 Word", key=f"dl_stu_{hw.id}"):
+            data = hw_svc.export_word(session, hw.id, with_answer=False)
+            st.download_button("⬇️ 下载学生卷", data, file_name=f"{hw.name}-学生卷.docx",
+                               mime=DOCX_MIME, key=f"dl_stu_b_{hw.id}")
+        if pc2.button("导出教师卷 Word", key=f"dl_tea_{hw.id}"):
+            data = hw_svc.export_word(session, hw.id, with_answer=True)
+            st.download_button("⬇️ 下载教师卷", data, file_name=f"{hw.name}-教师卷.docx",
+                               mime=DOCX_MIME, key=f"dl_tea_b_{hw.id}")
+
+    cc1, cc2 = st.columns(2)
+    if cc1.button("📦 存为模板", key=f"tpl_{hw.id}"):
+        hw_svc.save_as_template(session, hw.id)
+        session.commit()
+        st.toast("已存为模板，下次新建作业时可复制。")
+        st.rerun()
+
+
+def _smart_material_chapters(book: Textbook) -> list[str]:
+    """读取资料确认过的章节；缺失时从已保存全文按规则回退切分。"""
+    try:
+        info = json.loads(book.chapter_info or "[]")
+        titles = [str(item.get("title") or "").strip()
+                  for item in info if isinstance(item, dict)]
+        titles = list(dict.fromkeys(titles))
+        if titles:
+            return titles
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
+    text_path = Path(config.UPLOAD_DIR) / "text" / f"{book.id}.txt"
+    if text_path.exists():
+        chapters = qs_split_chapters(text_path.read_text(encoding="utf-8"))
+        return [item["title"] for item in chapters]
+    return []
+
+
+def qs_split_chapters(text: str):
+    """避免页面直接引入 material_service，复用题目资料文本的章节规则。"""
+    from utils import material_service
+    return material_service.split_chapters(text)
+
+
+def _smart_storage_type(type_name: str) -> str | None:
+    """把扩展题型中文标签归一到现有四类题型；非法题型返回 None。"""
+    key = str(type_name or "").strip().lower().replace(" ", "")
+    return qs.EXTENDED_TYPE_ALIASES.get(key)
+
+
+# ---------------------------------------------------------------------------
+# 独立智能组卷：草稿试卷 → 预览 → 正式试卷
+# ---------------------------------------------------------------------------
+
+_SMART_CONFIG_KEYS = [
+    "smart_compose_grade",
+    "smart_compose_material",
+    "smart_compose_chapters",
+    "smart_compose_kps",
+    "smart_compose_manual_kps",
+    "smart_compose_type_matrix",
+    "smart_compose_total",
+    "smart_compose_duration",
+    "smart_template_name",
+    "smart_compose_paper_name",
+]
+
+
+def tab_smart_compose():
+    """智能组卷独立 Tab：配置后先组草稿试卷，确认后转正式试卷。"""
+    st.subheader("🤖 智能组卷")
+    st.caption("按资料章节、知识点、题型题量和难度配比组卷，生成后创建为试卷。")
+
+    if st.session_state.get("smart_compose_result") is None:
+        # 清理上次异常退出可能残留的草稿。
+        with SessionLocal() as session:
+            leftovers = (session.query(Homework)
+                         .filter(Homework.is_template.is_(True))
+                         .all())
+            for draft in leftovers:
+                if draft.name.startswith(SMART_COMPOSE_DRAFT_PREFIX):
+                    session.delete(draft)
+            session.commit()
+        _smart_compose_config_ui()
+    else:
+        _smart_compose_preview_ui()
+
+
+def _cleanup_smart_draft(session, homework_id: int) -> None:
+    """删除智能组卷草稿及其题目关联。"""
+    draft = session.get(Homework, int(homework_id))
+    if draft is not None and draft.name.startswith(SMART_COMPOSE_DRAFT_PREFIX):
+        session.delete(draft)
+        session.flush()
+
+
+def _default_type_matrix(grade=None, subject=None) -> list[dict]:
+    """默认题型矩阵：选择题/填空题/计算题各 1 题，平台初始选择。
+
+    按学科动态适配：文科以 选择题/填空题/读写练习 为默认，保证题库中能抽到题。
+    """
+    subj = subject or "数学"
+    if subj in ("语文", "英语", "政治", "历史", "地理"):
+        types = ["选择题", "填空题", "读写练习"]
+    else:
+        types = ["选择题", "填空题", "计算题"]
+    return [{"type": t, "easy": 0, "medium": 1, "hard": 0} for t in types]
+
+
+def _smart_compose_config_ui():
+    """智能组卷配置界面。"""
+    if "smart_compose_type_matrix" not in st.session_state:
+        st.session_state["smart_compose_type_matrix"] = _default_type_matrix(
+            to_storage_grade("一年级"), "数学")
+
+    with st.container(border=True):
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            subject = _subject_selectbox(fs.SMART_COMPOSE_SUBJECT)
+        with c2:
+            grade = st.selectbox(
+                "年级", DISPLAY_GRADE_CHOICES, index=0,
+                key="smart_compose_grade")
+        with c3:
+            total_score = st.number_input(
+                "试卷总分", min_value=1.0, value=100.0, step=5.0,
+                key="smart_compose_total")
+        with c4:
+            duration = st.number_input(
+                "建议用时（分钟）", min_value=1, value=60, step=5,
+                key="smart_compose_duration")
+
+    with SessionLocal() as session:
+        # v1.7.7：资料按学科+年级过滤，grade为NULL的旧资料兼容显示
+        storage_grade = to_storage_grade(grade)
+        materials = (session.query(Textbook)
+                     .filter(Textbook.subject == subject)
+                     .filter((Textbook.grade == storage_grade) | Textbook.grade.is_(None))
+                     .order_by(Textbook.id.desc()).all())
+        material_labels = {book.id: book.name for book in materials}
+
+    book_id = st.selectbox(
+        "选择资料（可选）", [None] + [book.id for book in materials],
+        format_func=lambda x: "不使用资料" if x is None else material_labels[x],
+        key="smart_compose_material")
+    selected_book = next((book for book in materials if book.id == book_id), None)
+
+    chapter_options = (
+        _smart_material_chapters(selected_book) if selected_book is not None else [])
+    st.multiselect(
+        "选择章节（可选，只用于约束 AI 补题）", chapter_options,
+        disabled=selected_book is None,
+        key="smart_compose_chapters")
+
+    with SessionLocal() as session:
+        known_kps = qs.get_all_knowledge_points(session, subject)
+    st.multiselect(
+        "选择知识点（可选，题库和 AI 都按此约束）", known_kps,
+        key="smart_compose_kps")
+    manual_kps = st.text_input(
+        "手动补充知识点（逗号分隔）", key="smart_compose_manual_kps")
+    all_kps = list(dict.fromkeys(
+        list(st.session_state.get("smart_compose_kps", []))
+        + [item.strip()
+           for item in re.split(r"[，,、;；]", manual_kps) if item.strip()]
+    ))
+
+    st.markdown("**题型 × 难度数量**")
+    storage_grade = to_storage_grade(grade)
+    type_options = qs.question_type_options(storage_grade, subject)
+    matrix_rows = st.session_state["smart_compose_type_matrix"]
+
+    for idx, row in enumerate(matrix_rows):
+        c1, c2, c3, c4, c5, c6 = st.columns([3.2, 1, 1, 1, 0.8, 0.7])
+        current_index = (type_options.index(row["type"])
+                         if row["type"] in type_options else 0)
+        row["type"] = c1.selectbox(
+            "题型", type_options, index=current_index,
+            key=f"smart_type_{idx}", label_visibility="collapsed")
+        row["easy"] = int(c2.number_input(
+            "基础", min_value=0, value=int(row["easy"]), step=1,
+            key=f"smart_easy_{idx}"))
+        row["medium"] = int(c3.number_input(
+            "中等", min_value=0, value=int(row["medium"]), step=1,
+            key=f"smart_medium_{idx}"))
+        row["hard"] = int(c4.number_input(
+            "拓展", min_value=0, value=int(row["hard"]), step=1,
+            key=f"smart_hard_{idx}"))
+        c5.markdown(f"**{row['easy'] + row['medium'] + row['hard']}**")
+        if c6.button("🗑️", key=f"smart_del_row_{idx}"):
+            matrix_rows.pop(idx)
+            st.rerun()
+
+    bc1, bc2 = st.columns(2)
+    if bc1.button("➕ 添加题型行", key="smart_add_type_row"):
+        matrix_rows.append({
+            "type": type_options[0] if type_options else "选择题",
+            "easy": 0, "medium": 1, "hard": 0})
+        st.rerun()
+    if bc2.button("恢复默认题型", key="smart_reset_matrix"):
+        st.session_state["smart_compose_type_matrix"] = _default_type_matrix(
+            storage_grade, subject)
+        st.rerun()
+
+    with st.expander("📊 细目表预览", expanded=False):
+        _render_planned_specification(matrix_rows, total_score)
+
+    st.divider()
+    st.markdown("#### 组卷方案")
+    templates = scs.load_templates()
+    tc1, tc2, tc3 = st.columns(3)
+    selected_template = tc1.selectbox(
+        "加载组卷方案", [None] + templates,
+        format_func=lambda item: "不加载" if item is None else
+        f"{item.get('name')}（{item.get('created_at')}）",
+        key="smart_selected_template")
+    if tc2.button("📥 应用方案", key="smart_apply_template",
+                  disabled=selected_template is None):
+        template_subject = selected_template.get("subject") or subject
+        template_grade = selected_template.get("grade") or grade
+        if template_subject in SUBJECT_NAMES:
+            fs.set_feature_subject(fs.SMART_COMPOSE_SUBJECT, template_subject)
+        st.session_state["smart_compose_grade"] = template_grade
+        st.session_state["smart_compose_type_matrix"] = [
+            dict(row) for row in selected_template.get("rows", [])]
+        st.session_state["smart_compose_total"] = selected_template.get(
+            "total_score", 100.0)
+        st.session_state["smart_compose_duration"] = selected_template.get(
+            "duration", 60)
+        # v2.5.0：同时回填资料、章节、知识点（旧方案缺这些键时按空值）
+        st.session_state["smart_compose_material"] = selected_template.get(
+            "material_id")
+        st.session_state["smart_compose_chapters"] = list(
+            selected_template.get("chapters") or [])
+        st.session_state["smart_compose_kps"] = list(
+            selected_template.get("knowledge_points") or [])
+        st.rerun()
+    template_name = tc3.text_input("方案名称", key="smart_template_name")
+    sc1, sc2 = st.columns(2)
+    if sc1.button("💾 保存为组卷方案", key="smart_save_template"):
+        try:
+            scs.save_template(
+                template_name, subject, grade, total_score, duration, matrix_rows,
+                material_id=book_id,
+                chapters=list(st.session_state.get("smart_compose_chapters", [])),
+                knowledge_points=all_kps)
+            st.toast("组卷方案已保存。")
+            st.rerun()
+        except ValueError as exc:
+            st.warning(str(exc))
+    if sc2.button("🗑️ 删除所选方案", key="smart_delete_template",
+                  disabled=selected_template is None):
+        scs.delete_template(selected_template["template_id"])
+        st.rerun()
+    # v2.5.0：重命名所选方案
+    if selected_template is not None:
+        rn1, rn2 = st.columns([3, 1])
+        new_name = rn1.text_input(
+            "重命名所选方案", value=selected_template.get("name", ""),
+            key="smart_template_rename")
+        if rn2.button("✏️ 重命名", key="smart_rename_template"):
+            try:
+                scs.rename_template(selected_template["template_id"], new_name)
+                st.toast("方案已重命名。")
+                st.rerun()
+            except ValueError as exc:
+                st.warning(str(exc))
+
+    # v2.8.0：后台组卷（不阻塞界面；完成后在任务里给出草稿 ID）
+    if st.button("🚀 后台组卷", key="smart_compose_run_bg"):
+        from utils import task_service
+        _cfg = {
+            "matrix_rows": [dict(r) for r in matrix_rows],
+            "subject": subject, "grade": grade,
+            "total_score": float(total_score),
+            "material_id": selected_book.id if selected_book else None,
+            "chapters": list(st.session_state.get("smart_compose_chapters", [])),
+            "knowledge_points": all_kps,
+        }
+
+        def _compose_runner(params, progress, cancel_check):
+            from utils.db import SessionLocal as _SL
+            progress(10)
+            if cancel_check():
+                return {}
+            slots2 = hw_svc.slots_from_type_matrix(params["matrix_rows"])
+            progress(40)
+            with _SL() as sess:
+                draft = hw_svc.create_homework(
+                    sess, "__smart_compose_draft__bg",
+                    homework_type="exam", subject=params["subject"],
+                    grade=params["grade"],
+                    total_score=params["total_score"])
+                sess.commit()
+                result = hw_svc.auto_compose(
+                    sess, draft.id, slots=slots2,
+                    knowledge_points=params["knowledge_points"],
+                    ai_context={"textbook_id": params["material_id"],
+                                "chapters": params["chapters"],
+                                "grade": params["grade"]})
+                sess.commit()
+                draft_id = draft.id
+            progress(100)
+            return {"draft_id": draft_id,
+                    "rule_picked": result.get("rule_picked"),
+                    "ai_generated": result.get("ai_generated")}
+        tid = task_service.submit_task("智能组卷", _cfg, _compose_runner)
+        st.session_state["smart_compose_bg_task"] = tid
+        st.toast(f"已提交后台任务 #{tid}，可在「⚙️ 设置 → 📋 任务管理」查看。")
+    _ctid = st.session_state.get("smart_compose_bg_task")
+    if _ctid:
+        from utils import task_service as _ts
+        _ct = _ts.get_task(_ctid)
+        if _ct:
+            st.caption(f"组卷任务 #{_ctid}：{_ct['status']}（{_ct['progress']}%）")
+            if _ct["status"] == "completed" and (_ct.get("result") or {}).get("draft_id"):
+                if st.button("📂 载入后台组卷草稿", key="load_bg_draft"):
+                    st.session_state["smart_compose_result"] = {
+                        "homework_id": _ct["result"]["draft_id"],
+                        "result": _ct["result"]}
+                    st.rerun()
+
+    if st.button("🤖 开始组卷", type="primary", key="smart_compose_run"):
+        try:
+            slots = hw_svc.slots_from_type_matrix(matrix_rows)
+        except ValueError as exc:
+            st.error(str(exc))
+            return
+
+        import uuid
+        draft_name = f"{SMART_COMPOSE_DRAFT_PREFIX}{uuid.uuid4().hex}"
+        storage_grade = to_storage_grade(grade)
+        spec = {"slots": slots}
+        ai_context = {
+            "textbook_id": selected_book.id if selected_book else None,
+            "chapters": list(st.session_state.get("smart_compose_chapters", [])),
+            "grade": storage_grade,
+        }
+
+        draft_id = None
+        try:
+            with SessionLocal() as session:
+                draft = hw_svc.create_homework(
+                    session, draft_name, homework_type="exam",
+                    total_score=total_score, duration=duration,
+                    is_template=True, subject=subject, grade=storage_grade)
+                draft_id = draft.id
+                result = hw_svc.auto_compose(
+                    session, draft.id, spec, all_kps, ai_context=ai_context)
+                session.commit()
+        except Exception as exc:
+            if draft_id is not None:
+                try:
+                    with SessionLocal() as cleanup_session:
+                        hw_svc.delete_homeworks(cleanup_session, [draft_id])
+                        cleanup_session.commit()
+                except Exception as cleanup_exc:
+                    st.caption(f"临时草稿清理失败，请在智能组卷页手动删除：{cleanup_exc}")
+            st.error("组卷没有完成，暂时没有生成试卷。请调整资料、知识点或题型数量后重试。")
+            with st.expander("技术详情"):
+                st.text(str(exc))
+            return
+
+        display_grade = grade
+        try:
+            scs.add_history(subject, display_grade, draft_id, result)
+        except OSError:
+            st.caption("组卷历史暂时没有写入，不影响本次试卷。")
+        st.session_state.pop("smart_compose_paper_name", None)
+        st.session_state["smart_compose_result"] = {
+            "homework_id": draft_id,
+            "result": result,
+        }
+        st.rerun()
+
+    _generated_exams_panel(subject)
+    _compose_history_panel(subject)
+
+
+def _generated_exams_panel(subject: str):
+    """智能组卷页底部正式试卷列表（含批改/分析/逐题分析快速入口）。"""
+    st.divider()
+    st.markdown("### 📄 已生成试卷")
+    with SessionLocal() as session:
+        exams = hw_svc.list_homeworks(
+            session, templates=False, homework_type="exam", subject=subject)
+        exams = [item for item in exams
+                 if not item.name.startswith(SMART_COMPOSE_DRAFT_PREFIX)]
+        exam_counts = {item.id: hw_svc.question_count(session, item.id)
+                       for item in exams}
+    if not exams:
+        st.info("还没有生成试卷，上方配置后点击“开始组卷”。")
+        return
+    for exam in exams:
+        with st.container(border=True):
+            c1, c2, c3, c4, c5, c6 = st.columns([3.6, 1, 1, 1, 1, 1])
+            c1.markdown(
+                f"📄 **{exam.name}**　{exam.class_name or ''}　"
+                f"{exam_counts.get(exam.id, 0)} 题　满分 {exam.total_score or 0}")
+            if c2.button("✏️ 去批改", key=f"grade_exam_{exam.id}"):
+                goto_group("📝 学业测评", "✏️ 批改与分析",
+                           hw_open_id=exam.id)
+            if c3.button("📊 查看分析", key=f"an_exam_{exam.id}"):
+                with SessionLocal() as session:
+                    linked = es.get_or_create_exam_for_homework(session, exam)
+                    session.commit()
+                    exam_label = f"{linked.name}（{linked.exam_date}）"
+                st.session_state["_pending_app_route"] = "📊 学情"
+                st.session_state["_pending_app_sub"] = "考试分析"
+                st.session_state["_pending_app_sub_key"] = "analysis_tab"
+                st.session_state["analysis_exam_pick_label"] = exam_label
+                st.rerun()
+            if c4.button("打开编辑", key=f"open_exam_{exam.id}"):
+                with SessionLocal() as session:
+                    hw_svc.touch_homework(session, exam.id)
+                    session.commit()
+                goto_group("📝 学业测评", "作业管理", hw_open_id=exam.id)
+            if c5.button("导出", key=f"export_exam_{exam.id}"):
+                with SessionLocal() as session:
+                    data = hw_svc.export_word(session, exam.id, with_answer=False)
+                st.download_button(
+                    "⬇️ 下载试卷", data,
+                    file_name=f"{exam.name}.docx", mime=DOCX_MIME,
+                    key=f"download_exam_{exam.id}")
+            if c6.button("删除", key=f"del_exam_{exam.id}"):
+                st.session_state["confirm_del_exam"] = exam.id
+
+            with st.expander("📈 逐题分析"):
+                _exam_question_analysis(exam.id)
+
+            if st.session_state.get("confirm_del_exam") == exam.id:
+                cc1, cc2 = st.columns(2)
+                if cc1.button("确认删除", key=f"ok_del_exam_{exam.id}",
+                              type="primary"):
+                    with SessionLocal() as session:
+                        hw_svc.delete_homework(session, exam.id)
+                        session.commit()
+                    st.session_state.pop("confirm_del_exam", None)
+                    st.rerun()
+                if cc2.button("取消", key=f"cancel_del_exam_{exam.id}"):
+                    st.session_state.pop("confirm_del_exam", None)
+                    st.rerun()
+def _compose_history_panel(subject: str):
+    """显示最近 10 条组卷历史。"""
+    st.markdown("### 📜 组卷历史")
+    history = [item for item in scs.load_history()
+               if item.get("subject") == subject][:10]
+    if not history:
+        st.caption("暂无组卷历史。")
+        return
+    rows = [{
+        "时间": item.get("created_at", ""),
+        "年级": item.get("grade", ""),
+        "总题数": item.get("total_questions", 0),
+        "题库抽题": item.get("rule_picked", 0),
+        "AI补题": item.get("ai_generated", 0),
+        "未满足": item.get("shortage_count", 0),
+    } for item in history]
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+
+def _smart_compose_paper_stats(draft, pairs, subject):
+    """组卷预览统计：难度分布、题型分布、预估平均分、知识点覆盖率（v2.5.0）。"""
+    questions = [q for _link, q in pairs]
+    if not questions:
+        return
+    diff_scores = [(q.difficulty, float(link.score or 0))
+                   for link, q in pairs]
+
+    diff_counts = hstat.difficulty_distribution([q.difficulty for q in questions])
+    type_counts = hstat.type_distribution(
+        [TYPE_LABELS.get(q.question_type, q.question_type) for q in questions])
+    est = hstat.predict_average_score(diff_scores)
+
+    st.markdown("#### 📊 试卷结构")
+    c1, c2 = st.columns(2)
+    with c1:
+        pie = go.Figure(go.Pie(
+            labels=list(diff_counts.keys()),
+            values=list(diff_counts.values()), hole=0.4,
+            marker_colors=["#16a34a", "#f59e0b", "#dc2626"]))
+        pie.update_layout(title="难度分布", height=280,
+                          margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(pie, use_container_width=True)
+    with c2:
+        bar = go.Figure(go.Bar(x=list(type_counts.keys()),
+                               y=list(type_counts.values()),
+                               text=list(type_counts.values())))
+        bar.update_layout(title="题型分布", yaxis_title="题数", height=280,
+                          margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(bar, use_container_width=True)
+    if est["predicted"] is not None:
+        st.caption(f"预估平均分：**{est['predicted']}** / {est['full']}"
+                   f"（预估得分率 {est['rate'] * 100:.0f}%，仅为估算）")
+
+    # 知识点覆盖：目标 = 配置的知识点 ∪ 资料章节知识点
+    wanted = list(dict.fromkeys(
+        list(st.session_state.get("smart_compose_kps", []))
+        + [item.strip() for item in re.split(
+            r"[，,、;；]",
+            st.session_state.get("smart_compose_manual_kps", "")) if item.strip()]))
+    try:
+        chapter_kps = _smart_chapter_knowledge_points(
+            st.session_state.get("smart_compose_material"),
+            st.session_state.get("smart_compose_chapters", []))
+    except Exception:  # noqa: BLE001 —— 章节知识点解析失败不影响主流程
+        chapter_kps = []
+    target_kps = list(dict.fromkeys(wanted + chapter_kps))
+    if not target_kps:
+        st.caption("未配置知识点，暂不检查覆盖率。")
+        return
+    scores = {link.question_id: float(link.score or 0) for link, _q in pairs}
+    q_kps = [(q.id, qs.knowledge_points_list(q)) for _link, q in pairs]
+    report = hstat.knowledge_coverage(q_kps, target_kps)
+    rows = hstat.kp_coverage_rows(q_kps, target_kps, scores)
+    st.markdown("#### 🧩 知识点覆盖率")
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    missing = report.get("missing") or []
+    if missing:
+        st.error("未覆盖知识点：" + "、".join(missing))
+        if st.button("🔄 补充未覆盖知识点", key="smart_supplement_kps"):
+            added = _smart_supplement_questions(draft, missing)
+            if added:
+                st.toast(f"已补充 {added} 道题。")
+                st.rerun()
+    else:
+        st.success("目标知识点已全部覆盖。")
+
+
+def _smart_chapter_knowledge_points(material_id, chapters) -> list[str]:
+    """从所选资料的章节文本里粗提知识点；取不到就返回空（不影响主流程）。
+
+    资料正文按约定存在 uploads/text/{id}.txt；按章节标题锚点切片后抽取。
+    """
+    if not material_id or not chapters:
+        return []
+    try:
+        text_path = Path(config.UPLOAD_DIR) / "text" / f"{int(material_id)}.txt"
+        if not text_path.exists():
+            return []
+        full_text = text_path.read_text(encoding="utf-8")
+    except (OSError, ValueError, TypeError):
+        return []
+    # 章节标题在正文里的位置当锚点，取每章到下一章之间的文本
+    wanted = [str(c) for c in chapters if str(c).strip()]
+    anchors = []
+    for title in wanted:
+        pos = full_text.find(title)
+        if pos != -1:
+            anchors.append((pos, title))
+    anchors.sort()
+    pieces = []
+    for idx, (pos, _title) in enumerate(anchors):
+        end = anchors[idx + 1][0] if idx + 1 < len(anchors) else len(full_text)
+        pieces.append(full_text[pos:end])
+    text = " ".join(pieces) if pieces else full_text
+    return qs.extract_knowledge_points_from_text(text)
+
+
+def _smart_supplement_questions(draft, missing_kps: list[str]) -> int:
+    """为未覆盖知识点生成补充题并加入草稿试卷（v2.5.0）。"""
+    if not missing_kps:
+        return 0
+    gen = qs.generate_questions_for_knowledge_points(
+        missing_kps, subject=draft.subject or DEFAULT_SUBJECT,
+        grade=draft.grade, count_per_kp=1)
+    if not gen:
+        st.warning("未能生成补充题（AI 不可用或返回为空）。")
+        return 0
+    added = 0
+    with SessionLocal() as session:
+        ids = []
+        for item in gen:
+            try:
+                data = qs.validate_question(item)
+                if not data:
+                    continue
+                q = qs.create_question(session, data, source="ai_generated",
+                                       status="pending",
+                                       subject=draft.subject or DEFAULT_SUBJECT)
+                ids.append(q.id)
+            except Exception:  # noqa: BLE001 —— 单题失败不阻断
+                continue
+        session.commit()
+        if ids:
+            added = hw_svc.add_questions(session, draft.id, ids)
+            session.commit()
+    return added
+
+def _smart_compose_preview_ui():
+    """预览草稿试卷，确认后转正式试卷。"""
+    data = st.session_state["smart_compose_result"]
+    with SessionLocal() as session:
+        draft = session.get(Homework, data["homework_id"])
+        if draft is None:
+            st.session_state["smart_compose_result"] = None
+            st.rerun()
+            return
+        pairs = hw_svc.homework_questions(session, draft.id)
+        subject = draft.subject or DEFAULT_SUBJECT
+        grade = to_display_grade(draft.grade) or "未指定"
+
+    result = data["result"]
+    st.toast(
+        f"组卷完成：题库抽题 {result['rule_picked']} 道，"
+        f"AI 补题 {result['ai_generated']} 道，共 {len(pairs)} 道。")
+    if result.get("shortage_count"):
+        st.warning(f"仍有 {result['shortage_count']} 个槽位未满足。")
+
+    if st.checkbox(
+            "📊 查看双向细目表", value=True, key="smart_spec_table"):
+        _render_smart_specification_panel(
+            draft.id, pairs, draft.total_score, subject)
+
+    # v2.5.0：难度/题型分布、预估平均分、知识点覆盖率
+    _smart_compose_paper_stats(draft, pairs, subject)
+
+    for i, (_link, question) in enumerate(pairs, start=1):
+        title = (f"第{i}题 [{TYPE_LABELS.get(question.question_type, question.question_type)}"
+                 f"·{DIFF_LABELS.get(question.difficulty, question.difficulty)}]")
+        with st.expander(title):
+            st.markdown(question.content)
+            kps = qs.knowledge_points_list(question)
+            st.caption("知识点：" + ("、".join(kps) if kps else "—"))
+            if question.status != "approved":
+                st.caption("这道 AI 补题目前是待审核状态。")
+            if st.button("🗑️ 移除此题", key=f"remove_q_{question.id}"):
+                with SessionLocal() as session:
+                    hw_svc.remove_question(session, draft.id, question.id)
+                    session.commit()
+                st.rerun()
+
+    default_name = f"{subject}{grade}智能组卷"
+    paper_name = st.text_input(
+        "试卷名称", value=st.session_state.get("smart_compose_paper_name", default_name),
+        key="smart_compose_paper_name")
+
+    c1, c2, c3 = st.columns(3)
+    if c1.button("✅ 创建为正式试卷", type="primary", key="confirm_smart_paper"):
+        if not paper_name.strip():
+            st.error("请填写试卷名称。")
+            return
+        if not pairs:
+            st.error("当前没有题目，不能创建试卷。")
+            return
+        with SessionLocal() as session:
+            formal = session.get(Homework, draft.id)
+            formal.is_template = False
+            formal.homework_type = "exam"
+            formal.name = paper_name.strip()
+            session.commit()
+            formal_id = formal.id
+        st.session_state["smart_compose_result"] = None
+        goto_group("📝 学业测评", "作业管理", hw_open_id=formal_id, hw_batch_last="试卷已创建。")
+    if c2.button("🔄 重新配置", key="reconfigure_smart_paper"):
+        with SessionLocal() as session:
+            _cleanup_smart_draft(session, draft.id)
+            session.commit()
+        st.session_state["smart_compose_result"] = None
+        st.rerun()
+
+    if c3.button("❌ 放弃", key="discard_smart_paper"):
+        with SessionLocal() as session:
+            _cleanup_smart_draft(session, draft.id)
+            session.commit()
+        st.session_state["smart_compose_result"] = None
+        for key in _SMART_CONFIG_KEYS:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+
+# ===========================================================================
+# Tab 3：成绩录入
+# ===========================================================================
+
+def _grading_per_homework_panel(hw):
+    """作业批改：班级选择 + 总分导入/录入/成绩编辑/逐题批改。"""
+    st.subheader("✏️ 作业批改")
+    with SessionLocal() as session:
+        classes = student_svc.list_classes(session)
+    class_pick = st.selectbox(
+        "选择班级", ["（作业默认/全部）"] + classes,
+        index=(0 if not hw.class_name or hw.class_name not in classes
+               else classes.index(hw.class_name) + 1))
+    selected_class = (None if class_pick == "（作业默认/全部）"
+                      else class_pick)
+    st.caption("总分支持 Excel 导入或手动录入；需要错题本和每题正确率时，用下方逐题批改。")
+    tabs = st.tabs(["Excel 导入总分", "手动录总分", "成绩编辑", "逐题批改"])
+    with tabs[0]:
+        _import_total_scores(hw)
+    with tabs[1]:
+        _manual_total_scores(hw, selected_class)
+    with tabs[2]:
+        _score_editor(hw, selected_class)
+    with tabs[3]:
+        _grade_per_question(hw, selected_class)
+def _score_editor(hw, class_name):
+    """v1.8.0：单条成绩编辑。姓名/班级只读，分数列可编辑，🗑 删除单行。"""
+    with SessionLocal() as session:
+        rows = hscore.score_rows(session, hw.id, class_name)
+    if not rows:
+        st.info("该班还没有学生。可先用 Excel 导入（会自动建学生）或到学情页添加学生。")
+        return
+    # 内置 id 列：data_editor 不直接编辑 id，单独存。
+    table = pd.DataFrame([{
+        "学生": r["name"],
+        "班级": r["class_name"] or "",
+        "总分": None if r["score"] is None else float(r["score"]),
+        "状态": "已交" if r["score"] is not None else "未交",
+        "_score_id": r.get("score_id"),
+        "_student_id": r["student_id"],
+    } for r in rows])
+    edited = st.data_editor(
+        table, num_rows="fixed", width="stretch", hide_index=True,
+        key=f"score_editor_{hw.id}",
+        column_config={
+            "学生": st.column_config.TextColumn(disabled=True),
+            "班级": st.column_config.TextColumn(disabled=True),
+            "状态": st.column_config.TextColumn(disabled=True),
+            "_score_id": st.column_config.NumberColumn(disabled=True),
+            "_student_id": st.column_config.NumberColumn(disabled=True),
+        })
+    if st.button("💾 保存修改", type="primary",
+                 key=f"score_editor_save_{hw.id}"):
+        updated = 0
+        with SessionLocal() as session:
+            for _, new_row in edited.iterrows():
+                raw = new_row["总分"]
+                score = None if (raw is None or pd.isna(raw)) else float(raw)
+                hscore.update_score(session, hw.id,
+                                    int(new_row["_student_id"]), score)
+                updated += 1
+            session.commit()
+        st.toast(f"已更新 {updated} 条成绩。")
+        st.rerun()
+    # 单行删除：勾选 + 按钮
+    with SessionLocal() as session:
+        del_rows = hscore.score_rows(session, hw.id, class_name)
+    del_options = [(r["score_id"], f"{r['name']}（{r['class_name'] or '未分班'}）")
+                   for r in del_rows if r.get("score_id") is not None]
+    if del_options:
+        with st.container(border=True):
+            st.markdown("**删除单条成绩**")
+            pick = st.selectbox(
+                "选择要删除的成绩",
+                del_options,
+                format_func=lambda opt: opt[1],
+                key=f"score_editor_pick_del_{hw.id}")
+            if st.button("🗑️ 删除该条", key=f"score_editor_del_{hw.id}"):
+                with SessionLocal() as session:
+                    hscore.delete_score(session, int(pick[0]))
+                    session.commit()
+                st.toast("已删除。")
+                st.rerun()
+
+
+def _import_total_scores(hw):
+    """解析 Excel/CSV/TXT/PDF/Word：姓名 + 一个总分列，预览确认后 upsert。"""
+    up = st.file_uploader("选择成绩 Excel/CSV/TXT/PDF/Word（含“姓名”列和一个分数列）",
+                       type=["xlsx", "csv", "txt", "pdf", "docx"])
+    if up is None:
+        return
+    try:
+        fname = (up.name or "").lower()
+        if fname.endswith(".txt"):
+            text = up.getvalue().decode("utf-8-sig")
+            df = sdp.txt_score_dataframe(text)
+        elif fname.endswith(".docx"):
+            df = sdp.docx_score_dataframe(up.getvalue())
+        elif fname.endswith(".pdf"):
+            df = sdp.pdf_score_dataframe(up.getvalue())
+        else:
+            df = eh.load_dataframe(up)
+        if df is None or df.empty:
+            st.error("未从文件中识别到成绩表格，请检查文件格式或改用 Excel。")
+            return
+        detected = eh.detect_score_columns(df)
+    except Exception as exc:
+        st.error(f"读取失败：{exc}")
+        return
+    for problem in detected["problems"]:
+        st.error(problem)
+    if detected["name_col"] is None or not detected["subjects"]:
+        return
+    # 作业只有一个总分：取识别到的第一个分数列
+    score_col = detected["subjects"][0][0]
+    records = []
+    for _i, row in df.iterrows():
+        name = eh._to_text(row[detected["name_col"]])
+        score = eh._to_score(row[score_col])
+        cls = (eh._to_text(row[detected["class_col"]])
+               if detected["class_col"] else None)
+        if not name and score is None:
+            continue
+        records.append({"name": name, "class_name": cls, "score": score})
+    bad = [r for r in records if not r["name"] or r["score"] is None]
+    if bad:
+        st.warning(f"{len(bad)} 行缺姓名或缺分数，写入时跳过。")
+    st.dataframe(pd.DataFrame([{"姓名": r["name"], "班级": r["class_name"] or "",
+                                "分数": r["score"],
+                                "状态": ("正常" if r["name"] and r["score"] is not None
+                                         else "缺姓名/缺分")} for r in records]),
+                 width="stretch", hide_index=True)
+    if st.button("✅ 确认导入", type="primary", key="import_hw_score"):
+        with SessionLocal() as session:
+            result = hscore.import_total_scores(session, hw.id, records)
+            session.commit()
+        st.toast(f"写入 {result['written']} 条，更新 {result['updated']} 条，"
+                   f"自动新建学生 {result['created_students']} 人，跳过 {result['skipped']} 行。")
+        _render_instant_score_stats(hw.id)
+        st.session_state["hw_score_just_imported"] = hw.id
+        st.info("可在下方「成绩编辑」Tab 继续修改单条分数。")
+
+
+def _render_instant_score_stats(homework_id: int):
+    """保存成绩后立刻显示本次作业总体情况。"""
+    with SessionLocal() as session:
+        data = hscore.analyze_homework(session, homework_id)
+    overall = data["overall"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("已交人数", overall["submitted"])
+    c2.metric("平均分", overall["mean"] if overall["mean"] is not None else "—")
+    c3.metric("最高分", overall["max"] if overall["max"] is not None else "—")
+    c4.metric("最低分", overall["min"] if overall["min"] is not None else "—")
+
+
+def _manual_total_scores(hw, class_name):
+    """data_editor 手动录总分，保存后自动算并列排名。"""
+    with SessionLocal() as session:
+        rows = hscore.score_rows(session, hw.id, class_name)
+    if not rows:
+        st.info("该班还没有学生。可先用 Excel 导入（会自动建学生）或到学情页添加学生。")
+        return
+    editable = pd.DataFrame([{
+        "学生": r["name"], "班级": r["class_name"] or "",
+        "总分": r["score"] if r["score"] is not None else None,
+        "状态": "已交" if r["score"] is not None else "未交"} for r in rows])
+    edited = st.data_editor(
+        editable, num_rows="fixed", width="stretch", hide_index=True,
+        key=f"manual_total_{hw.id}",
+        column_config={"状态": st.column_config.TextColumn(disabled=True)})
+    if st.button("💾 保存总分", type="primary", key=f"save_total_{hw.id}"):
+        with SessionLocal() as session:
+            for r, (_, new) in zip(rows, edited.iterrows()):
+                val = new["总分"]
+                score = None if pd.isna(val) else float(val)
+                hscore.save_total_score(session, hw.id, r["student_id"], score)
+            session.commit()
+        st.toast("总分已保存。")
+        _render_instant_score_stats(hw.id)
+    # 排名预览
+    values = [None if pd.isna(v) else float(v) for v in edited["总分"]]
+    ranks = _ranks(values)
+    preview = edited.copy()
+    preview["班内排名"] = ranks
+    st.dataframe(preview, width="stretch", hide_index=True)
+
+
+def _ranks(values):
+    """并列竞赛名次，缺考 None。"""
+    scored = sorted((v for v in values if v is not None), reverse=True)
+    rank_map = {}
+    for i, v in enumerate(scored):
+        rank_map.setdefault(v, i + 1)
+    return [rank_map.get(v) if v is not None else None for v in values]
+
+def _grade_per_question(hw, class_name):
+    """逐题批改：一行一学生、一题一组（对错+得分+错误类型），写 HomeworkAnswer。"""
+    with SessionLocal() as session:
+        pairs = hw_svc.homework_questions(session, hw.id)
+        students = student_svc.list_students(session, class_name=class_name
+                                             or hw.class_name or None)
+        if not pairs:
+            st.info("这份作业还没有题目，先到“作业管理”加题。")
+            return
+        if not students:
+            st.info("该班还没有学生，先到学情页添加或用 Excel 导入成绩自动建学生。")
+            return
+
+        # 已有作答，便于回显
+        from models.models import HomeworkAnswer
+        existing = {}
+        for a in (session.query(HomeworkAnswer)
+                  .filter(HomeworkAnswer.homework_id == hw.id).all()):
+            existing[(a.student_id, a.question_id)] = a
+
+        st.caption(f"共 {len(students)} 名学生、{len(pairs)} 道题。"
+                   "每题选“对/错”即记录；错题可选错误类型，会自动进入错题本。")
+        entries = []
+        for stu in students:
+            with st.expander(f"{stu.name}（{stu.class_name or '未分班'}）",
+                             expanded=False):
+                for order, (link, q) in enumerate(pairs, start=1):
+                    old = existing.get((stu.id, q.id))
+                    c1, c2, c3 = st.columns([1.2, 1, 2])
+                    judge = c1.selectbox(
+                        f"第{order}题", ["未判", "对", "错"],
+                        index=(0 if old is None or old.is_correct is None
+                               else (1 if old.is_correct else 2)),
+                        key=f"j_{hw.id}_{stu.id}_{q.id}",
+                        label_visibility="visible")
+                    earned = c2.number_input(
+                        "得分", min_value=0.0, max_value=float(link.score or 100),
+                        value=float(old.earned_score) if (old and old.earned_score is not None)
+                        else 0.0,
+                        key=f"e_{hw.id}_{stu.id}_{q.id}")
+                    err_idx = 0
+                    if old and old.error_type in hscore.ERROR_TYPES:
+                        err_idx = hscore.ERROR_TYPES.index(old.error_type) + 1
+                    err = c3.selectbox(
+                        "错误类型", ["（无）"] + hscore.ERROR_TYPES,
+                        index=err_idx, key=f"t_{hw.id}_{stu.id}_{q.id}")
+                    if judge != "未判":
+                        entries.append({
+                            "student_id": stu.id, "question_id": q.id,
+                            "order_no": order,
+                            "is_correct": judge == "对",
+                            "earned_score": earned,
+                            "error_type": None if err == "（无）" else err,
+                        })
+        if st.button("💾 保存批改结果", type="primary", key=f"save_ans_{hw.id}"):
+            result = hscore.save_answers(session, hw.id, entries)
+            session.commit()
+            # v2.5.0：保存后按作答数据标定这些题的 AI 难度（不改用户设定难度）
+            try:
+                from utils import question_service as _qs
+                _qids = sorted({e["question_id"] for e in entries})
+                if _qids:
+                    _qs.recalibrate_difficulty(session, question_ids=_qids)
+                    session.commit()
+            except Exception:  # noqa: BLE001 —— 标定失败不影响批改保存
+                session.rollback()
+            st.toast(f"已保存 {result['written']} 条逐题作答，错题已进入错题本。")
+
+
+# ===========================================================================
+# Tab 3：作业分析
+# ===========================================================================
+
+def tab_tiered_homework():
+    """分层作业：按最近考试分层、可调整名单、生成三份草稿并选择性布置。"""
+    st.subheader("📚 分层作业")
+    st.caption("A=基础巩固（后30%）、B=能力提升（中间40%）、C=拓展挑战（前30%）。")
+    with SessionLocal() as session:
+        classes = student_svc.list_classes(session)
+    if not classes:
+        st.info("还没有班级和学生数据，先到「学生管理」导入名单。")
+        return
+    class_name = st.selectbox("班级", classes, key="tiered_class_name")
+    subject = st.selectbox(
+        "学科", SUBJECT_NAMES,
+        index=SUBJECT_NAMES.index("数学") if "数学" in SUBJECT_NAMES else 0,
+        key="tiered_subject")
+    per_layer = st.slider("每层题量", 3, 12, 5, key="tiered_question_count")
+
+    with SessionLocal() as session:
+        exam, rows = tiered_homework_service.select_tier_exam(
+            session, class_name)
+    if not rows:
+        st.info("该班暂无可用于分层的考试成绩；请先录入至少一场有总分的考试。")
+        return
+    st.caption(f"分层依据：{exam.name}｜{exam.exam_date:%Y-%m-%d}" if exam else "")
+    base_tiers = tiered_homework_service.build_tier_assignment(rows)
+    default_tier = {int(r["student_id"]): tier for tier, members in base_tiers.items()
+                    for r in members}
+    display = pd.DataFrame([{
+        "student_id": int(r["student_id"]),
+        "学生": r["name"],
+        "总分": round(float(r["total"]), 2),
+        "初始层级": default_tier[int(r["student_id"])],
+        "调整层级": default_tier[int(r["student_id"])],
+    } for r in sorted(rows, key=lambda x: (float(x["total"]), int(x["student_id"])))])
+    edited = st.data_editor(
+        display, hide_index=True,
+        column_config={"student_id": None,
+                       "调整层级": st.column_config.SelectboxColumn(
+                           "调整层级", options=["A", "B", "C"], required=True)},
+        key="tiered_assignment_editor", width="stretch")
+    assignments = {tier: [] for tier in ("A", "B", "C")}
+    for row in edited.to_dict("records"):
+        assignments[str(row["调整层级"])].append(int(row["student_id"]))
+    for tier in ("A", "B", "C"):
+        st.caption(f"{tier} 层：{len(assignments[tier])} 人")
+
+    if st.button("📚 生成三层作业", type="primary", key="tiered_generate"):
+        try:
+            with SessionLocal() as session:
+                result = tiered_homework_service.generate_tiered_homework(
+                    session, class_name, subject,
+                    questions_per_layer=per_layer, tier_assignments=assignments)
+            st.session_state["tiered_last_result"] = result
+            st.toast("已生成三份分层作业草稿。")
+            st.rerun()
+        except Exception as exc:  # noqa: BLE001 —— 分层失败给友好中文提示
+            st.error(f"生成分层作业失败：{exc}")
+
+    result = st.session_state.get("tiered_last_result")
+    if result and result.get("homework_ids"):
+        st.divider()
+        st.markdown("**本次生成结果**")
+        for tier, homework_id in result["homework_ids"].items():
+            with st.expander(f"{tier} 层作业 #{homework_id}", expanded=False):
+                with SessionLocal() as session:
+                    hw = session.get(Homework, int(homework_id))
+                    pairs = hw_svc.homework_questions(session, int(homework_id))
+                if hw is None:
+                    st.caption("作业不存在。")
+                    continue
+                st.caption(f"{hw.name}｜预计 {hw.duration or '—'} 分钟｜草稿")
+                for link, q in pairs:
+                    st.markdown(f"**{link.order}. {q.content[:80]}**")
+                    st.caption(f"答案：{q.answer}")
+        selected = st.multiselect("选择要布置的层级", ["A", "B", "C"],
+                                  key="tiered_deploy_levels")
+        if st.button("✅ 按所选层级布置", key="tiered_deploy_button"):
+            with SessionLocal() as session:
+                count = tiered_homework_service.deploy_tiered_homework(
+                    session, list(result["homework_ids"].values()), selected)
+                session.commit()
+            st.toast(f"已布置 {count} 份分层作业。")
+            st.rerun()
+
+    st.divider()
+    st.markdown("**分层作业列表**")
+    with SessionLocal() as session:
+        items = (session.query(Homework)
+                 .filter(Homework.level.isnot(None),
+                         Homework.is_template.is_(False),
+                         Homework.class_name == class_name)
+                 .order_by(Homework.created_at.desc(), Homework.id.desc()).all())
+    if not items:
+        st.caption("当前班级暂无分层作业。")
+    else:
+        st.dataframe(pd.DataFrame([{
+            "作业名": h.name, "学科": h.subject or "",
+            "层级": h.level or "", "状态": h.status,
+            "创建时间": h.created_at.strftime("%Y-%m-%d %H:%M") if h.created_at else "",
+        } for h in items]), hide_index=True, width="stretch")
+
+    with st.expander("📈 分层教学效果报告", expanded=False):
+        ids = [h.id for h in items]
+        if not ids:
+            st.caption("暂无可分析的分层作业。")
+        else:
+            with SessionLocal() as session:
+                report = tiered_homework_service.tier_effect_report(session, ids)
+            if not report:
+                st.caption("数据不足，暂不能生成分层效果报告。")
+            else:
+                st.dataframe(pd.DataFrame(report), hide_index=True, width="stretch")
+                data = tiered_homework_service.export_tier_effect_report(report)
+                st.download_button(
+                    "下载分层效果报告", data,
+                    file_name=f"{class_name}_分层教学效果报告.docx",
+                    mime=DOCX_MIME, key="tiered_effect_download")
+
+
+def tab_grading_analysis():
+    """✏️ 批改与分析：两标签共享类型筛选与作业/试卷选择（v2.4.1）。"""
+    st.subheader("✏️ 批改与分析")
+    st.caption("支持作业和试卷的逐题批改与成绩分析。")
+
+    # 快速入口带过来的自动选中项，消费后即清除。
+    auto_open_id = st.session_state.pop("hw_open_id", None)
+
+    with SessionLocal() as session:
+        all_items = [h for h in hw_svc.list_homeworks(session, templates=False)
+                     if h.status != "draft"]
+
+    type_filter = st.selectbox(
+        "类型筛选", ["全部", "📝 作业", "📄 试卷"],
+        key="grading_type_filter",
+        help="筛选要批改的是作业还是试卷")
+    if type_filter == "📝 作业":
+        candidates = [h for h in all_items if h.homework_type != "exam"]
+    elif type_filter == "📄 试卷":
+        candidates = [h for h in all_items if h.homework_type == "exam"]
+    else:
+        candidates = list(all_items)
+
+    if not candidates:
+        st.info("还没有可批改的作业或试卷。")
+        return
+
+    id_list = [h.id for h in candidates]
+    default_idx = (id_list.index(auto_open_id)
+                   if auto_open_id and auto_open_id in id_list else 0)
+    option_labels = [
+        f"{'📄' if h.homework_type == 'exam' else '📝'} "
+        f"[{h.subject or DEFAULT_SUBJECT}] "
+        f"{hw_svc.type_emoji(h.homework_type)} {h.name}"
+        f"（{h.class_name or '未分班'}）" for h in candidates]
+    idx = st.selectbox(
+        "选择作业/试卷", range(len(candidates)),
+        index=default_idx, format_func=lambda i: option_labels[i],
+        key="grading_pick_idx")
+    hw = candidates[idx]
+    st.markdown(
+        f"**{'📄 试卷' if hw.homework_type == 'exam' else '📝 作业'}**")
+
+    # v2.5.0：批改进度可视化 + 一键批改未批改客观题
+    _grading_progress_block(hw)
+    _review_panel(hw)
+
+    tabs = st.tabs(["✏️ 作业批改", "📊 批改分析"])
+    with tabs[0]:
+        _grading_per_homework_panel(hw)
+        _grading_question_intake(hw)
+        _grading_history_compare(hw)
+    with tabs[1]:
+        _analysis_panel(hw)
+
+
+def _review_panel(hw):
+    """讲评辅助：批改完成后生成 PPT、讲解稿并展示历史记录。"""
+    with SessionLocal() as session:
+        ready = review_service.is_review_ready(session, hw.id)
+    if not ready["ready"]:
+        st.caption(f"📢 生成讲评：{ready['reason']}")
+        return
+
+    if st.button("📢 生成讲评", key=f"review_generate_{hw.id}",
+                 type="primary"):
+        try:
+            with SessionLocal() as session:
+                result = review_service.build_review_files(session, hw.id)
+                session.commit()
+                st.session_state[f"review_last_{hw.id}"] = {
+                    "ppt": result["ppt_rel"],
+                    "script": result["script_rel"],
+                }
+            st.toast("讲评 PPT 和讲解稿已生成。")
+        except Exception as exc:  # noqa: BLE001 —— 生成失败不影响批改
+            st.error(f"生成讲评失败：{exc}")
+        st.rerun()
+
+    last = st.session_state.get(f"review_last_{hw.id}") or {}
+    if last.get("ppt"):
+        ppt_path = review_service.resolve_path(last["ppt"])
+        script_path = review_service.resolve_path(last.get("script"))
+        c1, c2 = st.columns(2)
+        if ppt_path and ppt_path.exists():
+            c1.download_button(
+                "下载讲评 PPT", ppt_path.read_bytes(),
+                file_name=ppt_path.name,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                key=f"review_ppt_download_{hw.id}")
+        if script_path and script_path.exists():
+            c2.download_button(
+                "下载讲解稿", script_path.read_bytes(),
+                file_name=script_path.name,
+                mime=DOCX_MIME, key=f"review_script_download_{hw.id}")
+
+    with SessionLocal() as session:
+        records = review_service.list_review_records(session, hw.id)
+    with st.expander("📚 历史讲评记录", expanded=False):
+        if not records:
+            st.caption("暂无讲评记录。")
+        for row in records:
+            st.caption(f"{row.created_at:%Y-%m-%d %H:%M} · 作业 #{row.homework_id}")
+            ppt_path = review_service.resolve_path(row.ppt_path)
+            script_path = review_service.resolve_path(row.script_path)
+            rc1, rc2 = st.columns(2)
+            if ppt_path and ppt_path.exists():
+                rc1.download_button(
+                    "下载 PPT", ppt_path.read_bytes(), file_name=ppt_path.name,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key=f"history_ppt_{row.id}")
+            else:
+                rc1.caption("PPT 文件不存在")
+            if script_path and script_path.exists():
+                rc2.download_button(
+                    "下载讲解稿", script_path.read_bytes(), file_name=script_path.name,
+                    mime=DOCX_MIME, key=f"history_script_{row.id}")
+            else:
+                rc2.caption("讲解稿文件不存在")
+
+
+def _grading_question_intake(hw):
+    """批改后题目收录：按选项标注来源/难度并入库（v2.5.1）。
+
+    题库里已存在本作业的题目（同一 questions 行），这里不重复创建，
+    只做「收录」：设置 AI 多维预估难度与依据、必要时审核通过、标注来源。
+    """
+    with st.expander("📥 本次批改题目入库", expanded=False):
+        with SessionLocal() as session:
+            pairs = hw_svc.homework_questions(session, hw.id)
+        if not pairs:
+            st.caption("这份作业还没有题目。")
+            return
+        with SessionLocal() as session:
+            data = hscore.analyze_homework(session, hw.id)
+        per_q = {q["question_id"]: q for q in (data.get("per_question") or [])}
+
+        def _rate(qid):
+            item = per_q.get(qid) or {}
+            return item.get("avg_rate")
+
+        def _discrimination(qid):
+            # 粗略区分度：高分与低分学生在该题上的得分率差（无数据返回 None）
+            with SessionLocal() as session:
+                from models.models import HomeworkAnswer, HomeworkScore
+                rows = (session.query(HomeworkAnswer, HomeworkScore)
+                        .join(HomeworkScore,
+                              (HomeworkScore.homework_id == HomeworkAnswer.homework_id)
+                              & (HomeworkScore.student_id == HomeworkAnswer.student_id))
+                        .filter(HomeworkAnswer.homework_id == hw.id,
+                                HomeworkAnswer.question_id == qid,
+                                HomeworkAnswer.earned_score.isnot(None),
+                                HomeworkScore.total_score.isnot(None)).all())
+            if len(rows) < 2:
+                return None
+            ordered = sorted(rows, key=lambda r: float(r[1].total_score), reverse=True)
+            top = ordered[: max(1, len(ordered) // 3)]
+            bottom = ordered[-max(1, len(ordered) // 3):]
+            def _mean(seg):
+                vals = [float(a.earned_score) for a, _s in seg]
+                return sum(vals) / len(vals) if vals else 0
+            return round((_mean(top) - _mean(bottom)) / 10.0, 3)
+
+        rows = []
+        for link, question in pairs:
+            rate = _rate(question.id)
+            disc = _discrimination(question.id)
+            rows.append({
+                "question_id": question.id,
+                "题干": question.content[:24],
+                "题型": TYPE_LABELS.get(question.question_type, question.question_type),
+                "得分率": rate, "区分度": disc,
+                "高频错题": bool(rate is not None and rate < 0.6),
+            })
+        st.caption("批改数据（得分率/区分度）仅作参考标签，不参与难度判定；难度采用 AI 多维度预估（AI 预估 50% + 知识点复杂度 20% + 步骤数 15% + 易错点 10% + 教师调整 5%）。")
+        st.dataframe(pd.DataFrame([{
+            "题干": r["题干"], "题型": r["题型"],
+            "得分率": ("—" if r["得分率"] is None else f"{r['得分率'] * 100:.0f}%"),
+            "区分度": ("—" if r["区分度"] is None else r["区分度"]),
+            "高频错题": "是" if r["高频错题"] else "否",
+        } for r in rows]), hide_index=True, width="stretch")
+
+        c1, c2, c3, c4 = st.columns(4)
+        picks = None
+        mode = None
+        if c1.button("全部加入", key=f"intake_all_{hw.id}"):
+            mode = "all"
+        if c2.button("只加高频错题", key=f"intake_wrong_{hw.id}"):
+            mode = "wrong"
+        if c3.button("只加好题", key=f"intake_good_{hw.id}"):
+            mode = "good"
+        if c4.button("暂不加入", key=f"intake_skip_{hw.id}"):
+            st.session_state[f"intake_done_{hw.id}"] = True
+            st.rerun()
+        manual = st.multiselect(
+            "手动选择要加入的题目", [r["question_id"] for r in rows],
+            format_func=lambda qid: next(r["题干"] for r in rows
+                                         if r["question_id"] == qid),
+            key=f"intake_manual_{hw.id}")
+        if manual and st.button("加入所选", key=f"intake_manual_go_{hw.id}"):
+            picks = list(manual)
+        if mode == "all":
+            picks = [r["question_id"] for r in rows]
+        elif mode == "wrong":
+            picks = [r["question_id"] for r in rows if r["高频错题"]]
+        elif mode == "good":
+            picks = [r["question_id"] for r in rows
+                     if r["得分率"] is not None and 0.6 <= r["得分率"] <= 0.8
+                     and (r["区分度"] or 0) >= 0.3]
+        if picks:
+            n = _intake_questions(hw, picks)
+            st.session_state[f"intake_done_{hw.id}"] = True
+            st.toast(f"已收录 {n} 道题（来源：批改入库）。")
+            st.rerun()
+
+
+def _intake_questions(hw, question_ids: list[int]) -> int:
+    """把批改题目标注来源与 AI 难度后收录（不重复创建）。"""
+    from utils import question_extract_service as qes
+    chat = None
+    if llm_client.is_content_configured():
+        chat = lambda sys_p, user_p: llm_client.chat_content(sys_p, user_p)
+    done = 0
+    with SessionLocal() as session:
+        for qid in dict.fromkeys(question_ids or []):
+            question = session.get(Question, qid)
+            if question is None:
+                continue
+            payload = {
+                "content": question.content or "",
+                "knowledge_points": qs.knowledge_points_list(question),
+                "error_points": question.error_points or "",
+            }
+            est = qes.estimate_difficulty(payload, chat_func=chat)
+            question.ai_difficulty = est["difficulty"]
+            question.difficulty_evidence = json.dumps(
+                est["evidence"], ensure_ascii=False)
+            if question.source not in ("material", "grading"):
+                question.source = "grading"
+                question.source_id = hw.id
+                question.source_info = (hw.name or "")[:200]
+            if question.status == "pending":
+                question.status = "approved"
+            done += 1
+        session.commit()
+    return done
+
+def _grading_progress_block(hw):
+    """批改进度：环形图 + 各题型完成率 + 一键批改客观题（v2.5.0）。"""
+    with SessionLocal() as session:
+        pairs = hw_svc.homework_questions(session, hw.id)
+        students = student_svc.list_students(
+            session, class_name=hw.class_name or None)
+        total = len(students)
+        answered = set()
+        for link, question in pairs:
+            ids = {a.student_id for a in session.query(HomeworkAnswer)
+                   .filter(HomeworkAnswer.homework_id == hw.id)
+                   .filter(HomeworkAnswer.question_id == question.id,
+                           HomeworkAnswer.earned_score.isnot(None)).all()}
+            answered |= ids
+    graded = len(answered)
+    progress = hstat.grading_progress(total, graded)
+    if not total:
+        return
+    st.markdown("#### 📈 批改进度")
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        ring = go.Figure(go.Pie(
+            labels=["已批改", "未批改"],
+            values=[graded, max(total - graded, 0)], hole=0.6,
+            marker_colors=["#16a34a", "#e5e7eb"]))
+        ring.update_layout(height=240, showlegend=True,
+                           margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(ring, use_container_width=True)
+        pct = f"{progress['rate'] * 100:.0f}%" if progress["rate"] is not None else "—"
+        st.caption(f"已批改 {graded}/{total} 人（{pct}）")
+    with c2:
+        type_rows = []
+        by_type = {}
+        for link, question in pairs:
+            label = TYPE_LABELS.get(question.question_type, question.question_type)
+            bucket = by_type.setdefault(label, {"题数": 0, "已判学生题次": 0})
+            bucket["题数"] += 1
+            bucket["已判学生题次"] += (session.query(HomeworkAnswer)
+                .filter(HomeworkAnswer.homework_id == hw.id,
+                        HomeworkAnswer.question_id == question.id,
+                        HomeworkAnswer.earned_score.isnot(None)).count())
+        for label, b in by_type.items():
+            denom = b["题数"] * total
+            rate = (b["已判学生题次"] / denom) if denom else 0
+            type_rows.append({"题型": label, "题数": b["题数"],
+                              "完成率": f"{rate * 100:.0f}%"})
+        st.dataframe(pd.DataFrame(type_rows), hide_index=True,
+                     width="stretch")
+        if progress["remaining_seconds"] is not None:
+            st.caption(f"预计剩余约 {progress['remaining_seconds'] // 60} 分钟")
+        else:
+            st.caption("预计剩余时间：—")
+    # 一键批改未批改的客观题（复用客观题重批服务）
+    has_objective = any(q.question_type in ("choice", "fill", "judge")
+                        for _l, q in pairs)
+    if has_submission_data(hw.id) and has_objective:
+        if st.button("🤖 一键批改未批改客观题", key=f"one_click_obj_{hw.id}"):
+            from utils import grading_service
+            with SessionLocal() as session:
+                result = grading_service.grade_homework_objective(
+                    session, hw.id, force=False)
+                session.commit()
+            st.toast(f"已批改 {result.get('updated', 0)} 条，跳过 {result.get('skipped', 0)} 条。")
+            st.rerun()
+
+
+def has_submission_data(homework_id: int) -> bool:
+    """该作业是否有在线提交数据（决定一键批改是否可用）。"""
+    with SessionLocal() as session:
+        return session.query(submit_svc.HomeworkSubmission).filter(
+            submit_svc.HomeworkSubmission.homework_id == homework_id).count() > 0
+
+
+def _grading_history_compare(hw):
+    """历次批改对比：某学生各知识点的历次得分趋势 + AI 评语建议（v2.5.0）。"""
+    with st.expander("📈 历次批改对比", expanded=False):
+        with SessionLocal() as session:
+            students = student_svc.list_students(
+                session, class_name=hw.class_name or None)
+        if not students:
+            st.info("该作业所属班级还没有学生。")
+            return
+        options = {st_.id: st_.name for st_ in students}
+        sid = st.selectbox("选择学生", list(options),
+                           format_func=lambda x: options[x],
+                           key=f"grade_hist_student_{hw.id}")
+        with SessionLocal() as session:
+            history = hscore.student_knowledge_history(
+                session, sid, subject=hw.subject)
+        series = history.get("series") or {}
+        if not series:
+            st.info("该学生还没有逐题批改数据。")
+            return
+        rows = []
+        for kp, items in series.items():
+            vals = [i["rate"] for i in items if i["rate"] is not None]
+            if not vals:
+                continue
+            delta = history["delta"].get(kp)
+            trend = ("↑ 进步" if (delta or 0) > 0
+                     else ("↓ 退步" if (delta or 0) < 0 else "→ 持平"))
+            rows.append({"知识点": kp,
+                         "历次得分率": "、".join(f"{v * 100:.0f}%" for v in vals),
+                         "最近变化": f"{(delta or 0) * 100:+.0f}%" if delta is not None else "—",
+                         "趋势": trend})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        _render_grading_comment_suggestion(hw, options.get(sid, ""), series)
+
+
+def _render_grading_comment_suggestion(hw, student_name: str, series: dict):
+    """按历次表现给批改评语建议；AI 不可用走规则兜底。"""
+    weakest = sorted(((kp, items[-1].get("rate") or 0)
+                      for kp, items in series.items() if items),
+                     key=lambda x: x[1])[:2]
+    if not weakest:
+        return
+    fallback = (f"{student_name}在" + "、".join(k for k, _ in weakest)
+                + "上仍需加强，建议针对性练习。")
+    if st.button("💡 生成批改评语建议", key=f"grade_comment_ai_{hw.id}_{student_name}"):
+        from utils import llm_client
+        advice = fallback
+        if llm_client.is_configured():
+            try:
+                data_text = "；".join(
+                    f"{kp}:{[(round(r or 0, 2)) for r in [i.get('rate') for i in items]]}"
+                    for kp, items in series.items())
+                advice = llm_client.chat(
+                    "你是一位中小学教师。根据学生历次知识点得分率，写一句鼓励为主、"
+                    "具体可执行的批改评语建议，不超过60字。",
+                    f"学生：{student_name}\n知识点得分率：{data_text}",
+                    temperature=0.5).strip() or fallback
+            except Exception:  # noqa: BLE001 —— AI 失败用规则兜底
+                advice = fallback
+        st.session_state[f"grade_comment_text_{hw.id}_{student_name}"] = advice
+    advice_text = st.session_state.get(f"grade_comment_text_{hw.id}_{student_name}")
+    if advice_text:
+        st.info("批改评语建议：" + advice_text)
+
+def _analysis_panel(hw):
+    """批改分析：对共享选择器选中的作业/试卷跑现有作业分析。"""
+    st.subheader("📊 批改分析")
+    with SessionLocal() as session:
+        data = hscore.analyze_homework(session, hw.id)
+        _render_analysis(session, hw, data)
+def _default_score_segments(full: float) -> pd.DataFrame:
+    """作业分析默认分数段。"""
+    return pd.DataFrame([
+        {"段名": "不及格", "下限": 0, "上限": full * 0.6},
+        {"段名": "及格", "下限": full * 0.6, "上限": full * 0.7},
+        {"段名": "中等", "下限": full * 0.7, "上限": full * 0.8},
+        {"段名": "良好", "下限": full * 0.8, "上限": full * 0.9},
+        {"段名": "优秀", "下限": full * 0.9, "上限": full + 1},
+    ])
+
+
+def _normalize_segments(df: pd.DataFrame, full: float):
+    """校验并归一自定义分数段，返回标签和边界。"""
+    rows = []
+    for row in df.to_dict("records"):
+        name = str(row.get("段名") or "").strip()
+        if not name:
+            continue
+        try:
+            lower = float(row.get("下限"))
+            upper = float(row.get("上限"))
+        except (TypeError, ValueError):
+            raise ValueError("分数段下限和上限必须是数字。")
+        if lower < 0 or upper <= lower:
+            raise ValueError("分数段下限不能为负，且上限必须大于下限。")
+        rows.append((name, lower, upper))
+    if not rows:
+        raise ValueError("请至少保留一个分数段。")
+    rows.sort(key=lambda x: x[1])
+    for i, item in enumerate(rows):
+        if i and round(item[1], 6) != round(rows[i - 1][2], 6):
+            raise ValueError("相邻分数段必须首尾相接。")
+    if rows[-1][2] < full + 0.001:
+        raise ValueError("最后一个分数段上限不能低于试卷总分。")
+    labels = [x[0] for x in rows]
+    edges = [x[1] for x in rows] + [rows[-1][2]]
+    return labels, edges
+
+
+def _render_analysis(session, hw, data):
+    overall = data["overall"]
+    rows = data["rows"]
+    full = full_score_service.get_homework_full_score(session, hw.id)
+    values = [r["score"] for r in rows if r["score"] is not None]
+
+    st.markdown("**分数阈值**")
+    t1, t2 = st.columns(2)
+    pass_line = t1.number_input(
+        "及格线（分）", min_value=0.0, max_value=full,
+        value=float(round(full * 0.6, 1)), step=1.0,
+        key=f"hw_pass_line_{hw.id}")
+    excellent_line = t2.number_input(
+        "优秀线（分）", min_value=0.0, max_value=full,
+        value=float(round(full * 0.85, 1)), step=1.0,
+        key=f"hw_excellent_line_{hw.id}")
+
+    pass_count = sum(1 for v in values if v >= pass_line)
+    excellent_count = sum(1 for v in values if v >= excellent_line)
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("提交率", (f"{overall['submission_rate'] * 100:.0f}%"
+                        if overall["submission_rate"] is not None else "—"))
+    c2.metric("已交 / 应到", f"{overall['submitted']} / {overall['total']}")
+    c3.metric("平均分", overall["mean"] if overall["mean"] is not None else "—")
+    c4.metric("最高分", overall["max"] if overall["max"] is not None else "—")
+    c5.metric("最低分", overall["min"] if overall["min"] is not None else "—")
+    c6.metric("优秀率", f"{excellent_count / len(values) * 100:.0f}%" if values else "—")
+    c7.metric("及格率", f"{pass_count / len(values) * 100:.0f}%" if values else "—")
+
+    st.markdown("**自定义分数段**")
+    segment_key = f"hw_score_segments_{hw.id}"
+    if segment_key not in st.session_state:
+        st.session_state[segment_key] = _default_score_segments(full)
+    segment_df = st.data_editor(
+        st.session_state[segment_key], num_rows="dynamic",
+        key=f"{segment_key}_editor", hide_index=True, width="stretch")
+    try:
+        segment_labels, segment_edges = _normalize_segments(segment_df, full)
+    except ValueError as exc:
+        st.warning(str(exc))
+        segment_labels, segment_edges = None, None
+
+    if values and segment_labels:
+        bands = stats_mod.score_bands(values, full, edges=segment_edges,
+                                      labels=segment_labels)
+        fig = go.Figure(go.Bar(
+            x=[b["label"] for b in bands], y=[b["count"] for b in bands],
+            marker_color="#1F4E79", text=[b["count"] for b in bands]))
+        fig.update_layout(title="分数段分布", height=320,
+                          margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig, width="stretch")
+
+
+    # v1.8.0：多班级对比
+    class_rows = hw_svc.list_homework_scores_grouped_by_class(
+        session, hw.id, pass_line=pass_line,
+        excellent_line=excellent_line, full_score=full)
+    with st.expander("🏫 多班级对比（≥2 个班级时显示）", expanded=False):
+        if len(class_rows) < 2:
+            st.info("多个班级有成绩后可对比。")
+        else:
+            cls_df = pd.DataFrame([{
+                "班级": r["class_name"],
+                "人数": r["count"],
+                "平均分": r["mean"],
+                "得分率(%)": r.get("mean_rate"),
+                "最高分": r["max"],
+                "最低分": r["min"],
+                "及格率(%)": r["pass_rate"],
+                "优秀率(%)": r["excellent_rate"],
+            } for r in class_rows])
+            st.dataframe(cls_df, width="stretch", hide_index=True)
+            fig_class_compare = go.Figure(go.Bar(
+                x=[r.get("mean_rate") or 0 for r in class_rows],
+                y=[r["class_name"] for r in class_rows],
+                orientation="h",
+                text=[f'{r["mean"]:g}/{full:g}' for r in class_rows],
+                hovertemplate="%{y}<br>得分率：%{x}%<br>原始分/满分：%{text}<extra></extra>"))
+            fig_class_compare.update_layout(
+                title="多班级得分率对比", xaxis_title="得分率(%)",
+                yaxis_title="班级", xaxis=dict(range=[0, 100]), height=300)
+            st.plotly_chart(fig_class_compare, width="stretch")
+
+    class_stats = {}
+    for r in rows:
+        if r["score"] is None:
+            continue
+        class_name = r["class_name"] or "未分班"
+        class_stats.setdefault(class_name, []).append(r["score"])
+    if len(class_stats) > 1:
+        class_names = list(class_stats)
+        means = [sum(class_stats[x]) / len(class_stats[x]) for x in class_names]
+        rates = [v / full * 100 for v in means]
+        fig_class = go.Figure(go.Bar(
+            x=class_names, y=rates, marker_color="#2E8B57",
+            text=[f"{v:.1f}%" for v in rates],
+            customdata=[f"{m:.1f}/{full:g}" for m in means],
+            hovertemplate="%{x}<br>得分率：%{y:.1f}%<br>原始分/满分：%{customdata}<extra></extra>"))
+        fig_class.update_layout(title="多班级得分率对比", height=320,
+                                yaxis=dict(range=[0, 100]),
+                                margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig_class, width="stretch")
+
+    deltas = data["deltas"]
+    prev_name = data["previous"].name if data["previous"] else None
+    table = []
+    for r in rows:
+        delta = deltas.get(r["student_id"])
+        if delta is None:
+            mark = "—"
+        elif delta > 0:
+            mark = f"↑ +{delta:g}"
+        elif delta < 0:
+            mark = f"↓ {delta:g}"
+        else:
+            mark = "持平"
+        rate = (round(r["score"] / full * 100, 1)
+                if r["score"] is not None and full else None)
+        table.append({"名次": r["rank"] if r["rank"] is not None else "未交",
+                      "姓名": r["name"], "班级": r["class_name"] or "",
+                      "总分": r["score"] if r["score"] is not None else "未交",
+                      "得分率": f"{rate}%" if rate is not None else "—",
+                      "进退步": mark})
+    rank_df = pd.DataFrame(table)
+    st.markdown(f"**学生排名**" + (f"（对比上一份作业：{prev_name}）" if prev_name else ""))
+    st.dataframe(rank_df, width="stretch", hide_index=True)
+    if not rank_df.empty:
+        import io
+        excel_buf = io.BytesIO()
+        rank_df.to_excel(excel_buf, index=False)
+        st.download_button(
+            "📊 导出排名 Excel", excel_buf.getvalue(),
+            file_name=f"{hw.name}-排名.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key=f"rank_excel_{hw.id}")
+
+    pq = data["per_question"]
+    if pq:
+        st.markdown("**每题正确率**")
+        qlabels, rates = [], []
+        qmap = {q.id: (i + 1, q) for i, (_l, q) in
+                enumerate(hw_svc.homework_questions(session, hw.id))}
+        for item in pq:
+            order, q = qmap.get(item["question_id"], (item["order_no"], None))
+            qlabels.append(f"第{order}题")
+            rates.append((item["rate"] or 0) * 100 if item["rate"] is not None else None)
+        fig2 = go.Figure(go.Bar(
+            x=qlabels, y=rates, marker_color="#2E8B57",
+            text=[("—" if r is None else f"{r:.0f}%") for r in rates]))
+        fig2.update_layout(title="每题正确率（%）", height=300, yaxis_range=[0, 100],
+                           margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(fig2, width="stretch")
+
+    top_wrong = data["top_wrong"]
+    if top_wrong:
+        st.markdown("**高频错题 TOP5**")
+        qmap = {q.id: (i + 1, q) for i, (_l, q) in
+                enumerate(hw_svc.homework_questions(session, hw.id))}
+        tw_rows = []
+        for item in top_wrong:
+            order, q = qmap.get(item["question_id"], (item["order_no"], None))
+            tw_rows.append({
+                "题目": f"第{order}题",
+                "错误人数": item["wrong"], "已判人数": item["judged"],
+                "典型错题": "是" if item["typical"] else "",
+                "题干": (q.content[:30] if q is not None else "")})
+        st.dataframe(pd.DataFrame(tw_rows), width="stretch", hide_index=True)
+
+    _render_completion_detail(session, hw)
+    _ai_summary(session, hw, data, values)
+    _export_analysis(session, hw)
+
+
+def _ai_summary(session, hw, data, values):
+    """AI 作业分析总结；可保存到作业备注。"""
+    st.markdown("**AI 分析总结**")
+    if not llm_client.is_configured():
+        st.info("还没配置 AI：到「⚙️ 设置 → 主模型配置」填写 API Key 后可生成分析。")
+        return
+    reply_key = f"hw_ai_reply_{hw.id}"
+    if st.button("🤖 生成分析总结", key=f"ai_hw_{hw.id}"):
+        pq_lines = []
+        for item in data["per_question"]:
+            if item["rate"] is not None:
+                pq_lines.append(f"第{item['order_no']}题正确率 {item['rate'] * 100:.0f}%，"
+                                f"错误 {item['wrong']} 人")
+        payload = (
+            f"作业：{hw.name}；应到 {data['overall']['total']} 人，"
+            f"已交 {data['overall']['submitted']} 人；"
+            f"均分 {data['overall']['mean']}，最高 {data['overall']['max']}，"
+            f"最低 {data['overall']['min']}。\n"
+            f"每题情况：{'；'.join(pq_lines) if pq_lines else '暂无逐题批改数据'}。")
+        system_prompt = _read_prompt("homework_analysis_prompt.txt").replace("{data}", "")
+        with st.spinner("AI 正在分析……"):
+            try:
+                st.session_state[reply_key] = llm_client.chat(
+                    system_prompt, payload, temperature=0.5)
+            except (llm_client.LLMConfigError, llm_client.LLMCallError) as exc:
+                st.error(f"生成失败：{exc}")
+                return
+    reply = st.session_state.get(reply_key)
+    if reply:
+        st.markdown(reply)
+        c1, c2 = st.columns(2)
+        if c1.button("💾 保存到作业备注", key=f"save_ai_remark_{hw.id}"):
+            hw_svc.update_homework(session, hw.id, remark=reply)
+            session.commit()
+            st.toast("已保存到作业备注。")
+        if c2.button("清除本次分析", key=f"clear_ai_reply_{hw.id}"):
+            st.session_state.pop(reply_key, None)
+            st.rerun()
+
+
+def _exam_question_analysis(homework_id: int):
+    """试卷逐题分析：得分率、难度系数、高频错题、知识点得分率（v2.4.1）。"""
+    with SessionLocal() as session:
+        data = hscore.analyze_homework(session, homework_id)
+        per_q = data.get("per_question") or []
+        pairs = hw_svc.homework_questions(session, homework_id)
+        qmap = {q.id: q for _link, q in pairs}
+
+    judged = [q for q in per_q if q.get("avg_rate") is not None]
+    if not judged:
+        st.info("请先到「✏️ 批改与分析」完成逐题批改。")
+        return
+
+    labels = [f"第{q['order_no']}题" for q in judged]
+    rates = [round((q["avg_rate"] or 0) * 100, 1) for q in judged]
+    colors = ["#dc2626" if r < 60 else ("#f59e0b" if r < 80 else "#16a34a")
+              for r in rates]
+    fig = go.Figure(go.Bar(x=labels, y=rates, marker_color=colors,
+                           text=[f"{r:g}%" for r in rates]))
+    fig.update_layout(title="各题得分率", yaxis_title="得分率(%)",
+                      height=320, margin=dict(l=10, r=10, t=50, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+    diff_rows = []
+    for q in judged:
+        coef = round(1 - (q["avg_rate"] or 0), 2)
+        level = "易" if coef < 0.3 else ("难" if coef > 0.7 else "中")
+        diff_rows.append({"题号": f"第{q['order_no']}题",
+                          "难度系数": coef, "难度等级": level})
+    st.dataframe(pd.DataFrame(diff_rows), hide_index=True, width="stretch")
+
+    wrongs = [q for q in per_q if q.get("wrong", 0) > 0]
+    wrongs.sort(key=lambda q: q.get("wrong", 0), reverse=True)
+    wrong_rows = []
+    for q in wrongs[:5]:
+        question = qmap.get(q["question_id"])
+        wrong_rate = round(q["wrong"] / q["judged"] * 100
+                          if q.get("judged") else 0, 1)
+        kps = (qs.knowledge_points_list(question) if question else [])
+        wrong_rows.append({
+            "题干": (question.content[:24] if question else "—"),
+            "错误率": f"{wrong_rate:g}%",
+            "知识点": "、".join(kps) or "—"})
+    if wrong_rows:
+        st.markdown("**高频错题 TOP5**")
+        st.dataframe(pd.DataFrame(wrong_rows), hide_index=True, width="stretch")
+
+    kp_buckets = {}
+    for q in judged:
+        question = qmap.get(q["question_id"])
+        for kp in (qs.knowledge_points_list(question) if question else []):
+            kp_buckets.setdefault(kp, []).append(q["avg_rate"] or 0)
+    if kp_buckets:
+        kp_names = list(kp_buckets)
+        kp_rates = [round(sum(kp_buckets[k]) / len(kp_buckets[k]) * 100, 1)
+                    for k in kp_names]
+        order = sorted(range(len(kp_names)), key=lambda i: kp_rates[i])
+        fig2 = go.Figure(go.Bar(
+            y=[kp_names[i] for i in order],
+            x=[kp_rates[i] for i in order], orientation="h",
+            text=[f"{kp_rates[i]:g}%" for i in order]))
+        fig2.update_layout(title="知识点得分率", xaxis_title="得分率(%)",
+                           height=max(240, 30 * len(kp_names) + 120),
+                           margin=dict(l=10, r=10, t=50, b=10))
+        st.plotly_chart(fig2, use_container_width=True)
+
+
+def _export_analysis(session, hw):
+    """把分析结果导成 Word 和 PPT。"""
+    _exp_col1, _exp_col2 = st.columns(2)
+    if _exp_col1.button("📄 导出分析报告 Word", key=f"exp_hw_{hw.id}"):
+        data = hscore.analyze_homework(session, hw.id)
+        import io
+        from docx import Document
+        doc = Document()
+        doc.add_heading(f"{hw.name} · 作业分析", level=0)
+        o = data["overall"]
+        doc.add_paragraph(
+            f"应到 {o['total']} 人，已交 {o['submitted']} 人，"
+            f"均分 {o['mean']}，最高 {o['max']}，最低 {o['min']}。")
+        doc.add_heading("学生排名", level=1)
+        for r in data["rows"]:
+            if r.get("score") is not None and full:
+                doc.add_paragraph(f"得分率：{r['score'] / full * 100:.1f}%")
+            doc.add_paragraph(
+                f"{r['rank'] if r['rank'] is not None else '未交'}. "
+                f"{r['name']}　{r['score'] if r['score'] is not None else '未交'}分")
+        doc.add_heading("每题正确率", level=1)
+        for item in data["per_question"]:
+            rate = "未批改" if item["rate"] is None else f"{item['rate'] * 100:.0f}%"
+            doc.add_paragraph(f"第{item['order_no']}题：{rate}（错误 {item['wrong']} 人）")
+        buf = io.BytesIO()
+        doc.save(buf)
+        st.download_button("⬇️ 下载分析报告", buf.getvalue(),
+                           file_name=f"{hw.name}-分析.docx", mime=DOCX_MIME,
+                           key=f"dl_analyze_{hw.id}")
+    if _exp_col2.button("📊 导出分析报告 PPT", key=f"exp_hw_ppt_{hw.id}"):
+        try:
+            from utils import export_service
+            _ppt_bytes = export_service.analysis_report_ppt(
+                session, hw.id, "homework")
+            st.download_button(
+                "⬇️ 下载 PPT", _ppt_bytes,
+                file_name=f"{hw.name}-分析.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                key=f"dl_analyze_ppt_{hw.id}")
+        except Exception as _ppt_exc:
+            st.error(f"PPT 导出失败：{_ppt_exc}")
+
+# ===========================================================================
+# Tab 4：错题本
+# ===========================================================================
+
+def tab_wrong_book():
+    """错题本：统计、筛选、重做、按知识点聚合、单题移除。"""
+    st.subheader("错题本")
+    current_subject = _subject_selectbox(fs.WRONG_BOOK_SUBJECT)
+
+    with SessionLocal() as session:
+        students = student_svc.list_students(session)
+        homeworks = hw_svc.list_homeworks(
+            session, templates=False, subject=current_subject)
+
+    with st.container(border=True):
+        c1, c2, c3, c4, c5 = st.columns(5)
+        stu = c1.selectbox(
+            "学生", [None] + students,
+            format_func=lambda x: "全部学生" if x is None else
+            f"{x.name}（{x.class_name or '未分班'}）",
+            key="wb_student")
+        grade_filter = c2.selectbox(
+            "年级", ["全部年级"] + DISPLAY_GRADE_CHOICES, key="wb_grade")
+        hw = c3.selectbox(
+            "作业", [None] + homeworks,
+            format_func=lambda x: "全部作业" if x is None else x.name,
+            key="wb_hw")
+        err = c4.selectbox(
+            "错误类型", [None] + hscore.ERROR_TYPES,
+            format_func=lambda x: "全部类型" if x is None else x,
+            key="wb_err")
+        keyword = c5.text_input("知识点/题干关键词", key="wb_kw")
+
+    storage_grade = None if grade_filter == "全部年级" else to_storage_grade(grade_filter)
+    with SessionLocal() as session:
+        rows = hscore.list_wrong_answers(
+            session,
+            student_id=stu.id if stu is not None else None,
+            homework_id=hw.id if hw is not None else None,
+            error_type=err, knowledge_keyword=keyword.strip() or None,
+            subject=current_subject, grade=storage_grade)
+
+    if not rows:
+        st.info("暂无错题，继续保持。需要逐题批改后，错题才会自动收集到这里。")
+        return
+
+    selected_count = sum(
+        1 for r in rows if st.session_state.get(f"retry_pick_{r['answer_id']}"))
+    error_counts = {}
+    for r in rows:
+        key = r.get("error_type") or "未分类"
+        error_counts[key] = error_counts.get(key, 0) + 1
+    top_error = max(error_counts, key=error_counts.get) if error_counts else "—"
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("总错题数", len(rows))
+    m2.metric("涉及学生", len({r["student_id"] for r in rows}))
+    m3.metric("高频错误类型", top_error)
+    m4.metric("待重做", selected_count)
+
+    # v1.8.0：各知识点错题数柱状图（取首知识点归类，前 10）
+    kp_counter: dict[str, int] = {}
+    for r in rows:
+        kps = r.get("knowledge_points") or []
+        key = kps[0] if kps else "未标注"
+        kp_counter[key] = kp_counter.get(key, 0) + 1
+    if kp_counter:
+        sorted_items = sorted(kp_counter.items(), key=lambda kv: kv[1], reverse=True)
+        top = sorted_items[:10]
+        if len(sorted_items) > 10:
+            top.append(("其他", sum(c for _, c in sorted_items[10:])))
+        chart_df = pd.DataFrame(
+            {"错题数": [c for _, c in top]},
+            index=[k for k, _ in top])
+        st.bar_chart(chart_df, height=260)
+
+    view_mode = st.radio(
+        "查看方式", ["按题目列表", "按知识点聚合"], horizontal=True,
+        key="wb_view_mode")
+    if view_mode == "按知识点聚合":
+        _wrong_knowledge_aggregation(rows)
+        return
+
+    basket = st.session_state.setdefault("next_hw_question_basket", [])
+    bc1, bc2 = st.columns([4, 1])
+    bc1.caption(f"🧺 题篮：{len(basket)} 道题待带入新作业（仅同学科作业）。")
+    if bc2.button("清空题篮", key="clear_basket_wrongbook", disabled=not basket):
+        st.session_state["next_hw_question_basket"] = []
+        st.rerun()
+
+    _retry_preview_editor(rows, current_subject)
+
+    export_group_label = st.radio(
+        "PDF 分类方式", ["按学生", "按知识点"], horizontal=True,
+        key="wb_pdf_group")
+    ec1, ec2 = st.columns(2)
+    if ec1.button("📄 导出错题本 Word", key="wb_export"):
+        data = hscore.export_wrong_word(rows, title=f"{current_subject}错题本")
+        st.download_button(
+            "⬇️ 下载错题本", data,
+            file_name=f"{current_subject}错题本.docx",
+            mime=DOCX_MIME, key="wb_export_dl")
+    if ec2.button("📄 导出错题本 PDF", key="wb_export_pdf"):
+        data = hscore.export_wrong_pdf(
+            rows, title=f"{current_subject}错题本",
+            group_by="student" if export_group_label == "按学生" else "knowledge")
+        st.download_button(
+            "⬇️ 下载错题本 PDF", data,
+            file_name=f"{current_subject}错题本.pdf",
+            mime="application/pdf", key="wb_export_pdf_dl")
+
+    for r in rows:
+        tag = "　🔥 典型错题" if r["typical"] else ""
+        grade_text = to_display_grade(r.get("grade")) or "未指定"
+        with st.expander(
+                f"{r['student_name']}｜{grade_text}｜{r['homework_name']}｜"
+                f"第{r['order_no'] or '?'}题{tag}｜{r['error_type'] or '未分类'}"):
+            st.checkbox("➕ 加入错题重做卷",
+                        key=f"retry_pick_{r['answer_id']}")
+            st.caption(
+                f"知识点：{'、'.join(r['knowledge_points']) or '—'}　"
+                f"题型：{TYPE_LABELS.get(r['question_type'], r['question_type'])}　"
+                f"本题得分：{r['earned_score'] if r['earned_score'] is not None else '未录'}")
+            ac1, ac2, ac3 = st.columns(3)
+            in_basket = r["question_id"] in basket
+            if ac1.button("➕ 加入下次作业", key=f"wb_add_{r['answer_id']}",
+                          disabled=in_basket):
+                _add_to_next_hw_basket(r["question_id"])
+                st.toast("已加入题篮，新建同学科作业时自动带入。")
+                st.rerun()
+            if ac2.button("🔓 打开这次作业", key=f"wb_open_{r['answer_id']}"):
+                goto_group("📝 学业测评", "作业管理", hw_open_id=r["homework_id"])
+            if ac3.button("✅ 已掌握，移除", key=f"wb_remove_{r['answer_id']}"):
+                with SessionLocal() as session:
+                    hscore.remove_answer(session, r["answer_id"])
+                    session.commit()
+                st.session_state.pop(f"retry_pick_{r['answer_id']}", None)
+                st.rerun()
+
+            st.markdown("**原题**")
+            _render_math(r["content"])
+            st.markdown("**正确答案**")
+            _render_math(r["answer"])
+            if r["analysis"]:
+                st.markdown("**解析**")
+                _render_math(r["analysis"])
+
+    selected_ids = []
+    for r in rows:
+        if st.session_state.get(f"retry_pick_{r['answer_id']}"):
+            selected_ids.append(r["question_id"])
+    selected_ids = list(dict.fromkeys(selected_ids))
+    if st.button("🧾 用勾选错题生成重做卷", type="primary", key="make_retry_hw"):
+        if not selected_ids:
+            st.warning("请先勾选要加入重做卷的错题。")
+        else:
+            prepared_items = []
+            for question_id in selected_ids:
+                r = next(x for x in rows if x["question_id"] == question_id)
+                try:
+                    score = float(r.get("original_score"))
+                    if score <= 0:
+                        score = 10.0
+                except (TypeError, ValueError):
+                    score = 10.0
+                prepared_items.append({
+                    "question_id": question_id,
+                    "题干摘要": _truncate_for_retry(r["content"]),
+                    "difficulty": int(r["difficulty"]),
+                    "score": score,
+                })
+            st.session_state["retry_preview_items"] = prepared_items
+            st.rerun()
+
+
+def _wrong_knowledge_groups(rows: list[dict]) -> list[dict]:
+    """按知识点聚合错题；没有知识点的题归入未标注。"""
+    groups = {}
+    for r in rows:
+        kps = r.get("knowledge_points") or ["未标注知识点"]
+        for kp in kps:
+            group = groups.setdefault(str(kp), {
+                "count": 0, "students": set(), "samples": []})
+            group["count"] += 1
+            group["students"].add(r["student_name"])
+            if len(group["samples"]) < 3:
+                group["samples"].append(_truncate_for_retry(r["content"], 50))
+
+    table = []
+    for kp, group in sorted(
+            groups.items(), key=lambda item: item[1]["count"], reverse=True):
+        table.append({
+            "知识点": kp,
+            "错题数": group["count"],
+            "涉及学生": "、".join(sorted(group["students"])),
+            "题干摘要": "；".join(group["samples"]),
+        })
+    return table
+
+
+def _wrong_knowledge_aggregation(rows: list[dict]):
+    """显示知识点聚合结果。"""
+    st.dataframe(
+        pd.DataFrame(_wrong_knowledge_groups(rows)),
+        width="stretch", hide_index=True)
+
+
+def _truncate_for_retry(text: str, n: int = 40) -> str:
+    text = str(text).replace("\n", " ")
+    return text if len(text) <= n else text[:n] + "…"
+
+
+def _clear_retry_pick_state(rows) -> None:
+    """取消或生成后，清掉错题勾选、预览和编辑器状态。"""
+    st.session_state.pop("retry_preview_items", None)
+    st.session_state.pop("retry_question_editor", None)
+    for r in rows:
+        st.session_state.pop(f"retry_pick_{r['answer_id']}", None)
+
+
+def _retry_preview_editor(rows, subject: str) -> None:
+    """重做卷确认前的统一可编辑预览；此时尚未创建作业。"""
+    items = st.session_state.get("retry_preview_items")
+    if not items:
+        return
+    current_ids = {r["question_id"] for r in rows}
+    if any(int(item["question_id"]) not in current_ids for item in items):
+        _clear_retry_pick_state(rows)
+        st.rerun()
+
+    st.markdown("#### 错题重做卷预览")
+    st.caption("可修改难度和分值；确认后才创建作业。修改难度会复制成新题，不改原题。")
+    preview_df = pd.DataFrame([{
+        "题目ID": item["question_id"],
+        "题干摘要": item["题干摘要"],
+        "难度": item["difficulty"],
+        "分值": item["score"],
+    } for item in items])
+    st.data_editor(
+        preview_df, hide_index=True, width="stretch",
+        num_rows="fixed", key="retry_question_editor",
+        column_config={
+            "题目ID": None,
+            "题干摘要": st.column_config.TextColumn(disabled=True),
+            "难度": st.column_config.NumberColumn(
+                "难度", min_value=1, max_value=3, step=1,
+                help="1=基础，2=中等，3=拓展"),
+            "分值": st.column_config.NumberColumn(
+                "分值", min_value=0.1, step=1.0),
+        })
+
+    cc1, cc2 = st.columns(2)
+    if cc1.button("✅ 确认生成重做卷", type="primary", key="confirm_retry_hw"):
+        changes = st.session_state.get(
+            "retry_question_editor", {}).get("edited_rows", {})
+        edited_items = []
+        for i, item in enumerate(items):
+            prepared = dict(item)
+            changed = changes.get(str(i), {})
+            if "难度" in changed and changed["难度"] is not None:
+                prepared["difficulty"] = int(changed["难度"])
+            if "分值" in changed and changed["分值"] is not None:
+                prepared["score"] = float(changed["分值"])
+            edited_items.append(prepared)
+        edited_ids = {int(x["question_id"]) for x in edited_items}
+        selected_rows = [r for r in rows if r["question_id"] in edited_ids]
+        class_names = {r["class_name"] for r in selected_rows if r["class_name"]}
+        class_name = next(iter(class_names)) if len(class_names) == 1 else None
+        try:
+            with SessionLocal() as session:
+                name = hw_svc.default_retry_homework_name(session)
+                result = hw_svc.generate_retry_homework(
+                    session, edited_items, name, subject,
+                    class_name=class_name, duration=45)
+                session.commit()
+                new_id = result["homework_id"]
+            _clear_retry_pick_state(rows)
+            goto_group("📝 学业测评", "作业管理", hw_open_id=new_id)
+        except ValueError as exc:
+            st.error(str(exc))
+    if cc2.button("取消", key="cancel_retry_hw"):
+        _clear_retry_pick_state(rows)
+        st.rerun()
+
+
+
+# ---------------------------------------------------------------------------
+# Tab 6：历史记录
+# ---------------------------------------------------------------------------
+
+def _manage_history():
+    """历史记录：统一管理已完成的日常作业和试卷。"""
+    st.subheader("📜 历史记录")
+    st.caption("这里存放所有已标记完成的作业和试卷，可打开查看、再次布置、删除或批量导出。")
+    current_subject = _subject_selectbox(
+        fs.HISTORY_SUBJECT, caption="历史记录使用独立的学科筛选，不影响作业管理。")
+
+    with st.container(border=True):
+        f1, f2, f3, f4 = st.columns(4)
+        keyword = f1.text_input("名称搜索", key="history_filter_keyword")
+        type_choice = f2.selectbox(
+            "类型", ["all", "daily", "exam"],
+            format_func=lambda x: {"all": "全部", "daily": "作业", "exam": "试卷"}[x],
+            key="history_filter_type")
+        grade_choice = f3.selectbox(
+            "年级", ["全部年级"] + DISPLAY_GRADE_CHOICES,
+            key="history_filter_grade")
+        f4.caption("按完成时间倒序排列。")
+
+    storage_grade = None if grade_choice == "全部年级" else to_storage_grade(grade_choice)
+    with SessionLocal() as session:
+        orm_rows = hw_svc.list_homeworks(
+            session, templates=False, subject=current_subject,
+            keyword=keyword.strip() or None, grade=storage_grade,
+            status="completed")
+        rows = [_history_row_dict(row) for row in orm_rows]
+
+    if type_choice == "daily":
+        rows = [row for row in rows if not row["is_exam"]]
+    elif type_choice == "exam":
+        rows = [row for row in rows if row["is_exam"]]
+    # 页面端按完成时间倒序；空值排到最后。
+    rows.sort(key=lambda row: (bool(row["completed_at"]), row["completed_at"]),
+              reverse=True)
+
+    exam_count = sum(1 for row in rows if row["is_exam"])
+    daily_count = len(rows) - exam_count
+    m1, m2, m3 = st.columns(3)
+    m1.metric("历史记录总数", len(rows))
+    m2.metric("作业数", daily_count)
+    m3.metric("试卷数", exam_count)
+
+    if not rows:
+        st.info("暂无历史记录，到作业管理标记作业为完成后会出现在这里。")
+        return
+
+    for row in rows:
+        _render_history_row(row)
+
+    picked_ids = [row["id"] for row in rows
+                  if st.session_state.get(f"history_pick_{row['id']}")]
+    if picked_ids:
+        st.caption(f"已选 {len(picked_ids)} 份历史记录。")
+        if st.button(f"📦 批量导出 Word（{len(picked_ids)}）",
+                      key="history_batch_export_btn"):
+            with SessionLocal() as session:
+                zip_bytes = hw_svc.export_homeworks_zip(session, picked_ids)
+            st.download_button(
+                "⬇️ 下载历史记录 Word 压缩包", zip_bytes,
+                file_name="历史记录批量导出.zip",
+                mime="application/zip", key="history_batch_export_dl")
+
+
+def _history_row_dict(hw) -> dict:
+    """把已完成作业 ORM 对象整理成页面展示数据。"""
+    return {
+        "id": hw.id,
+        "name": hw.name,
+        "type": hw.homework_type,
+        "is_exam": hw.homework_type == "exam",
+        "class_name": hw.class_name,
+        "n": len(hw.questions),
+        "total": hw.total_score or 0,
+        "grade": hw.grade,
+        "completed_at": hw.completed_at.strftime("%Y-%m-%d %H:%M")
+        if hw.completed_at else "",
+    }
+
+
+def _render_history_row(hw):
+    """渲染一条已完成作业/试卷。"""
+    if hasattr(hw, "homework_type"):
+        data = _history_row_dict(hw)
+    else:
+        data = hw
+    hid = data["id"]
+    paper_tag = "（试卷）" if data["is_exam"] else ""
+    with st.container(border=True):
+        c0, c1, c2, c3, c4, c5 = st.columns([0.5, 4.0, 0.9, 0.9, 0.9, 0.9])
+        c0.checkbox("选择", key=f"history_pick_{hid}", label_visibility="collapsed")
+        c1.markdown(
+            f"{('📄 ' if data['is_exam'] else '')}{hw_svc.type_emoji(data['type'])} **{data['name']}**{paper_tag}　"
+            f"（{to_display_grade(data['grade']) or '未指定'}）　"
+            f"{data['class_name'] or ''}　{data['n']} 题　"
+            f"满分 {data['total']}　完成时间 {data['completed_at']}")
+        if c2.button("打开编辑", key=f"history_open_{hid}"):
+            with SessionLocal() as session:
+                hw_svc.touch_homework(session, hid)
+                session.commit()
+            goto_group("📝 学业测评", "作业管理", hw_open_id=hid)
+        # v1.8.0：成绩入口——跳转作业分析并预选该作业。
+        if c3.button("📊 成绩", key=f"history_scores_{hid}"):
+            # v2.4.0：作业分析并入「作业批改与分析」；预选该作业。
+            goto_group("📝 学业测评", "作业批改与分析", analyze_pick_homework_id=hid)
+        if c4.button("再次布置", key=f"history_copy_{hid}"):
+            with SessionLocal() as session:
+                clone = hw_svc.duplicate_homework(session, hid)
+                session.commit()
+                new_id = clone.id
+            goto_group("📝 学业测评", "作业管理", hw_open_id=new_id)
+        if c5.button("删除", key=f"history_delete_{hid}"):
+            st.session_state["history_confirm_delete"] = hid
+
+        if st.session_state.get("history_confirm_delete") == hid:
+            st.warning("删除后，这份记录的题目关联、成绩与作答都会一起删除。")
+            cc1, cc2 = st.columns(2)
+            if cc1.button("确认删除（含成绩与作答）",
+                          key=f"history_delete_ok_{hid}", type="primary"):
+                with SessionLocal() as session:
+                    hw_svc.delete_homework(session, hid)
+                    session.commit()
+                st.session_state.pop("history_confirm_delete", None)
+                st.session_state.pop(f"history_pick_{hid}", None)
+                if st.session_state.get("hw_open_id") == hid:
+                    st.session_state.pop("hw_open_id", None)
+                st.rerun()
+            if cc2.button("取消", key=f"history_delete_cancel_{hid}"):
+                st.session_state.pop("history_confirm_delete", None)
+                st.rerun()
+
+def _add_to_next_hw_basket(question_id: int) -> None:
+    """把题加入“下次作业”题篮，按 question_id 去重。"""
+    basket = st.session_state.setdefault("next_hw_question_basket", [])
+    if question_id not in basket:
+        basket.append(question_id)
+
+
+
+# ---------------------------------------------------------------------------
+# v1.9.2：智能组卷双向细目表 UI
+# ---------------------------------------------------------------------------
+
+def _cell_text(count: int, score: float) -> str:
+    """细目表格子文本。"""
+    return f"{count}题/{score:g}分"
+
+
+def _render_planned_specification(matrix_rows: list[dict],
+                                  total_score: float) -> None:
+    """组卷前按题型矩阵预览各难度计划题数和分值。"""
+    grand_total = sum(int(row.get("easy") or 0)
+                      + int(row.get("medium") or 0)
+                      + int(row.get("hard") or 0)
+                      for row in matrix_rows)
+    if grand_total <= 0:
+        st.caption("配置题型数量后可预览细目表。")
+        return
+
+    display_rows = []
+    difficulty_scores = {1: 0.0, 2: 0.0, 3: 0.0}
+    used_total = 0.0
+    nonempty = [row for row in matrix_rows
+                if int(row.get("easy") or 0)
+                + int(row.get("medium") or 0)
+                + int(row.get("hard") or 0) > 0]
+
+    for row_index, row in enumerate(nonempty):
+        counts = {1: int(row.get("easy") or 0),
+                  2: int(row.get("medium") or 0),
+                  3: int(row.get("hard") or 0)}
+        count = sum(counts.values())
+        is_last = row_index == len(nonempty) - 1
+        row_score = round(float(total_score) * count / grand_total, 2)
+        if is_last:
+            row_score = round(float(total_score) - used_total, 2)
+        used_total = round(used_total + row_score, 2)
+
+        values = {}
+        used_score = 0.0
+        active_difficulties = [d for d in (1, 2, 3) if counts[d] > 0]
+        for d_index, difficulty in enumerate(active_difficulties):
+            is_last_cell = d_index == len(active_difficulties) - 1
+            cell_score = round(row_score * counts[difficulty] / count, 2)
+            if is_last_cell:
+                cell_score = round(row_score - used_score, 2)
+            used_score = round(used_score + cell_score, 2)
+            values[difficulty] = _cell_text(counts[difficulty], cell_score)
+            difficulty_scores[difficulty] = round(
+                difficulty_scores[difficulty] + cell_score, 2)
+
+        display_rows.append({
+            "题型": row.get("type"),
+            "基础": values.get(1, "—"),
+            "中等": values.get(2, "—"),
+            "拓展": values.get(3, "—"),
+            "合计": _cell_text(count, row_score),
+        })
+
+    display_rows.append({
+        "题型": "合计",
+        "基础": _cell_text(
+            sum(int(row.get("easy") or 0) for row in nonempty),
+            difficulty_scores[1]),
+        "中等": _cell_text(
+            sum(int(row.get("medium") or 0) for row in nonempty),
+            difficulty_scores[2]),
+        "拓展": _cell_text(
+            sum(int(row.get("hard") or 0) for row in nonempty),
+            difficulty_scores[3]),
+        "合计": _cell_text(grand_total, float(total_score)),
+    })
+    st.dataframe(pd.DataFrame(display_rows), hide_index=True, width="stretch")
+
+
+def _effective_question_scores(pairs: list, total_score: float) -> dict[int, float]:
+    """优先用逐题分值；缺分值时按作业总分等额分摊。"""
+    if not pairs:
+        return {}
+    if all(link.score is not None for link, _question in pairs):
+        return {question.id: float(link.score) for link, question in pairs}
+
+    total = float(total_score or 0.0)
+    each = round(total / len(pairs), 2)
+    result = {}
+    for index, (_link, question) in enumerate(pairs):
+        if index == len(pairs) - 1:
+            result[question.id] = round(total - each * (len(pairs) - 1), 2)
+        else:
+            result[question.id] = each
+    return result
+
+
+def _specification_dataframe(spec: dict) -> pd.DataFrame:
+    """把细目表结构转成展示 DataFrame。"""
+    total_score = float(spec["total"]["score"] or 0.0)
+    rows = []
+    for kp in spec["knowledge_points"]:
+        values = []
+        for difficulty in ("1", "2", "3"):
+            item = spec["cells"][kp][difficulty]
+            values.append(_cell_text(item["count"], item["score"]))
+        kp_total = spec["kp_totals"][kp]
+        ratio = kp_total["score"] / total_score if total_score else 0
+        rows.append({
+            "知识点": kp,
+            "基础": values[0],
+            "中等": values[1],
+            "拓展": values[2],
+            "合计": _cell_text(kp_total["count"], kp_total["score"]),
+            "占比": f"{ratio * 100:.1f}%",
+        })
+    rows.append({
+        "知识点": "合计",
+        "基础": _cell_text(spec["difficulty_totals"]["1"]["count"],
+                           spec["difficulty_totals"]["1"]["score"]),
+        "中等": _cell_text(spec["difficulty_totals"]["2"]["count"],
+                           spec["difficulty_totals"]["2"]["score"]),
+        "拓展": _cell_text(spec["difficulty_totals"]["3"]["count"],
+                           spec["difficulty_totals"]["3"]["score"]),
+        "合计": _cell_text(spec["total"]["count"], spec["total"]["score"]),
+        "占比": "100%",
+    })
+    return pd.DataFrame(rows)
+
+
+def _render_smart_specification_panel(homework_id: int, pairs: list,
+                                      total_score: float,
+                                      subject: str) -> None:
+    """渲染双向细目表、指标和格子管理入口。"""
+    scores = _effective_question_scores(pairs, total_score)
+    questions = [question for _link, question in pairs]
+    spec = scs.build_specification_table(questions, scores)
+    actual_total = float(spec["total"]["score"] or 0.0)
+
+    st.divider()
+    st.markdown("#### 📊 双向细目表")
+    if abs(actual_total - float(total_score or 0)) > 0.01:
+        st.caption(f"细目表分值合计 {actual_total:g}，与登记总分 {float(total_score or 0):g} 不一致。")
+    st.dataframe(_specification_dataframe(spec), hide_index=True, width="stretch")
+
+    with SessionLocal() as session:
+        bank_kps = qs.get_all_knowledge_points(session, subject)
+    used_kps = {kp for kp in spec["knowledge_points"] if kp != "未标注"}
+    coverage = (len(used_kps & set(bank_kps)) / len(bank_kps) * 100
+                if bank_kps else 100.0)
+    distribution_parts = []
+    for difficulty in ("1", "2", "3"):
+        score = spec["difficulty_totals"][difficulty]["score"]
+        ratio = score / actual_total if actual_total else 0
+        distribution_parts.append(
+            f"{DIFF_LABELS[int(difficulty)]} {ratio * 100:.0f}%")
+
+    c1, c2 = st.columns(2)
+    c1.metric("知识点覆盖率", f"{coverage:.0f}%")
+    c2.metric("难度分布", " / ".join(distribution_parts))
+
+    if not questions:
+        return
+    pick_cols = st.columns([2, 1, 1])
+    picked_kp = pick_cols[0].selectbox(
+        "选择知识点格子", spec["knowledge_points"], key="spec_pick_kp")
+    picked_difficulty_name = pick_cols[1].selectbox(
+        "选择难度", ["基础", "中等", "拓展"], key="spec_pick_difficulty")
+    picked_difficulty = {"基础": 1, "中等": 2, "拓展": 3}[picked_difficulty_name]
+    if pick_cols[2].button("查看格子题目", key="spec_open_cell"):
+        _specification_cell_dialog(
+            homework_id, picked_kp, picked_difficulty, subject)
+
+
+@st.dialog("格子题目")
+def _specification_cell_dialog(homework_id: int, knowledge_point: str,
+                               difficulty: int, subject: str) -> None:
+    """查看某个细目表格子内题目，可移除或替换。"""
+    with SessionLocal() as session:
+        pairs = hw_svc.homework_questions(session, homework_id)
+        questions = [question for _link, question in pairs]
+        current = scs.get_questions_by_cell(questions, knowledge_point, difficulty)
+
+        st.caption(f"{knowledge_point} · {DIFF_LABELS[difficulty]}")
+        for question in current:
+            st.markdown(f"**#{question.id}**　{question.content[:180]}")
+            if st.button("移除本题", key=f"spec_remove_{question.id}"):
+                hw_svc.remove_question(session, homework_id, question.id)
+                session.commit()
+                st.rerun()
+
+        existing_ids = {question.id for question in questions}
+        candidates = []
+        for question in qs.list_questions(session, status="approved", subject=subject):
+            kps = qs.knowledge_points_list(question) or ["未标注"]
+            if (int(question.difficulty) == difficulty
+                    and knowledge_point in kps
+                    and question.id not in existing_ids):
+                candidates.append(question)
+
+        if candidates:
+            labels = {f"#{question.id} {question.content[:40]}": question
+                      for question in candidates}
+            picked_label = st.selectbox("选择替换题", list(labels.keys()),
+                                        key="spec_replace_pick")
+            if st.button("替换选中题", key="spec_replace_apply"):
+                target = labels[picked_label]
+                if current:
+                    hw_svc.replace_question(
+                        session, homework_id, current[-1].id, target.id)
+                    session.commit()
+                    st.rerun()
+        else:
+            st.caption("没有同学科、同知识点、同难度的已审核替换题。")
+
+
+# ---------------------------------------------------------------------------
+# v1.9.7：作业图片智能批改弹窗
+# ---------------------------------------------------------------------------
+
+@st.dialog("📷 智能批改", width="large")
+def _grading_dialog(hw_id: int):
+    """上传作业图片 → 识别批改 → 展示结果 → 确认录入。"""
+    from utils import grading_service
+    hw_id = int(hw_id)
+
+    with SessionLocal() as session:
+        hw = session.get(Homework, hw_id)
+        if hw is None:
+            st.error("作业不存在。")
+            return
+        students = student_svc.list_students(
+            session, class_name=hw.class_name or None)
+
+    if not students:
+        st.warning("还没有学生，先到“学情 → 学生管理”添加。")
+        return
+
+    st.caption("智能批改为 AI 辅助，主观题仅供参考，请教师复核。")
+    name_map = {s.id: f"{s.name}（{s.class_name}）" for s in students}
+    student_id = st.selectbox(
+        "选择学生", options=list(name_map),
+        format_func=lambda x: name_map[x], key=f"grading_student_{hw_id}")
+    mode_label = st.radio(
+        "批改范围", ["全部批改", "仅批改客观题"], horizontal=True,
+        key=f"grading_mode_{hw_id}")
+    files = st.file_uploader(
+        "上传作业照片（可多张）", type=["png", "jpg", "jpeg"],
+        accept_multiple_files=True, key=f"grading_files_{hw_id}")
+
+    if st.button("🔍 开始批改", type="primary",
+                 key=f"grading_start_{hw_id}"):
+        if not files:
+            st.warning("请先上传作业图片。")
+        else:
+            with st.spinner("正在识别并批改…"):
+                mode = ("objective_only"
+                        if mode_label == "仅批改客观题" else "all")
+                images = [f.read() for f in files]
+                st.session_state[f"grading_result_{hw_id}"] = (
+                    grading_service.grade_homework_image(
+                        images, hw_id, int(student_id), mode=mode))
+
+    result = st.session_state.get(f"grading_result_{hw_id}")
+    if not result:
+        return
+
+    st.markdown(f"**总得分：{result['total_score']}**")
+    st.caption(result.get("ai_comment", ""))
+    for item in result["items"]:
+        with st.container(border=True):
+            st.markdown(
+                f"第{item['order_no']}题（{TYPE_LABELS.get(item['question_type'])}）"
+                f"　得分 {item['earned_score']}/{item['score']}")
+            if item.get("need_confirm"):
+                st.warning("⚠️ 识别结果不确定，需人工确认/修正")
+            # v2.7.0：识别结果可编辑修正
+            item["student_answer"] = st.text_input(
+                "学生答案（可修正）", value=item.get("student_answer") or "",
+                key=f"grading_ans_{hw_id}_{item['order_no']}")
+            st.caption(f"标准答案：{item['standard_answer']}")
+            if item.get("comment"):
+                st.caption(item["comment"])
+
+    cc1, cc2 = st.columns(2)
+    if cc1.button("✅ 确认录入成绩", type="primary",
+                  key=f"grading_confirm_{hw_id}"):
+        with SessionLocal() as session:
+            grading_service.confirm_grading(session, result)
+            session.commit()
+        st.session_state.pop(f"grading_result_{hw_id}", None)
+        st.toast("成绩已录入。")
+        st.session_state.pop("grading_dialog_id", None)
+        st.rerun()
+    if cc2.button("🔄 重新批改", key=f"grading_retry_{hw_id}"):
+        st.session_state.pop(f"grading_result_{hw_id}", None)
+        st.rerun()
+
+# ---------------------------------------------------------------------------
+# v2.1.0：客观题重批、主观题批改、抄袭检测、完成度分析、个性化作业
+# ---------------------------------------------------------------------------
+
+
+def _objective_regrade_controls(session, hid: int):
+    """在线提交区的客观题重批控件。"""
+    from utils import grading_service
+
+    st.markdown("**客观题重批**")
+    force = st.checkbox("强制覆盖已有教师评语记录",
+                        key=f"auto_grade_force_{hid}")
+    if st.button("🔁 重批客观题",
+                 key=f"auto_grade_objective_{hid}"):
+        result = grading_service.grade_homework_objective(
+            session, hid, force=force)
+        st.toast(
+            f"已重批 {result['updated']} 条，跳过 {result['skipped']} 条。")
+
+
+def _grading_comment_template_controls(hid: int, question_id: int) -> str:
+    """评语模板控件：选择内置/自定义模板，支持保存与删除；返回选中模板文本。"""
+    from utils import subjective_grading_service as sgs
+
+    templates = sgs.load_comment_templates()
+    labels = {t["template_id"]: t["name"] for t in templates}
+    with st.expander("💬 评语模板", expanded=False):
+        picked_tpl = st.selectbox(
+            "选择评语模板", [None] + [t["template_id"] for t in templates],
+            format_func=lambda x: "不使用模板" if x is None else labels[x],
+            key=f"grade_tpl_pick_{hid}_{question_id}")
+        selected_text = ""
+        if picked_tpl is not None:
+            selected_text = next(
+                (t["text"] for t in templates if t["template_id"] == picked_tpl), "")
+            st.caption("模板内容：" + selected_text)
+            if st.button("📋 批量应用到批改结果",
+                         key=f"grade_tpl_apply_{hid}_{question_id}"):
+                for key in list(st.session_state.keys()):
+                    if key.startswith("subjective_feedback_"):
+                        st.session_state[key] = selected_text
+                st.toast("已应用模板，请重新查看批改结果。")
+        c1, c2 = st.columns([2, 1])
+        new_name = c1.text_input("自定义模板名称",
+                                 key=f"grade_tpl_new_name_{hid}_{question_id}")
+        new_text = c1.text_area("自定义模板内容",
+                                key=f"grade_tpl_new_text_{hid}_{question_id}")
+        if c2.button("💾 保存为模板",
+                     key=f"grade_tpl_save_{hid}_{question_id}"):
+            try:
+                sgs.save_comment_template(new_name, new_text)
+                st.toast("模板已保存。")
+                st.rerun()
+            except ValueError as exc:
+                st.warning(str(exc))
+        custom_ids = [t["template_id"] for t in templates if not t.get("builtin")]
+        if custom_ids:
+            del_pick = c2.selectbox(
+                "删除自定义模板", custom_ids,
+                format_func=lambda x: labels.get(x, x),
+                key=f"grade_tpl_del_pick_{hid}_{question_id}")
+            if c2.button("🗑️ 删除模板",
+                         key=f"grade_tpl_del_{hid}_{question_id}"):
+                try:
+                    sgs.delete_comment_template(del_pick)
+                    st.toast("模板已删除。")
+                    st.rerun()
+                except ValueError as exc:
+                    st.warning(str(exc))
+    return selected_text
+
+def _subjective_grading_panel(session, hid: int):
+    """按一道解答题批量 AI 批改，并允许逐人保存人工调整结果。"""
+    from utils import subjective_grading_service
+
+    pairs = hw_svc.homework_questions(session, hid)
+    solution_questions = [
+        (question.id, link.order, question.content[:30])
+        for link, question in pairs if question.question_type == "solution"
+    ]
+    if not solution_questions:
+        return
+
+    st.markdown("**主观题 AI 批改**")
+    picked = st.selectbox(
+        "选择解答题", solution_questions,
+        format_func=lambda item: f"第{item[1]}题 {item[2]}",
+        key=f"subjective_pick_{hid}")
+    rubric = st.text_input(
+        "评分标准（可选）", key=f"subjective_rubric_{picked[0]}")
+    # v2.5.0：主观题评语模板（内置预设 + 自定义，可批量应用）
+    template_text = _grading_comment_template_controls(hid, picked[0])
+    if st.button("🤖 批量批改", key=f"batch_subjective_{picked[0]}"):
+        st.session_state[f"subjective_payload_{hid}"] = (
+            subjective_grading_service.batch_grade_subjective(
+                session, hid, picked[0], rubric=rubric))
+
+    payload = st.session_state.get(f"subjective_payload_{hid}")
+    if not payload:
+        return
+
+    for result in payload["results"]:
+        with st.container(border=True):
+            st.caption(
+                f"{result['student_name']}｜"
+                f"{result['score'] if result['score'] is not None else '未评分'}"
+                f"/{result['max_score']:g}")
+            st.caption(f"学生答案：{result['student_answer'] or '未作答'}")
+            score_value = int(result["percent"] or 0)
+            new_score = st.number_input(
+                "百分制分数", min_value=0, max_value=100,
+                value=score_value,
+                key=f"subjective_score_{result['submission_id']}")
+            default_feedback = st.session_state.get(
+                f"subjective_feedback_{result['submission_id']}",
+                result.get("feedback", ""))
+            if template_text:
+                default_feedback = template_text
+            new_feedback = st.text_area(
+                "评语", value=default_feedback,
+                key=f"subjective_feedback_{result['submission_id']}")
+            if st.button("💾 保存人工批改",
+                         key=f"save_subjective_{result['submission_id']}"):
+                submit_svc.update_manual_grade(
+                    session, result["submission_id"],
+                    float(new_score), new_feedback)
+                st.toast("已保存。")
+    if st.button("✅ 确认并留存批改记录",
+                 key=f"save_subjective_log_{hid}"):
+        subjective_grading_service.save_batch_log(
+            session, hid, payload["question_id"], payload)
+        st.toast("已写入批改记录。")
+
+
+def _plagiarism_panel(session, hid: int):
+    """在线提交区的作业抄袭检测。"""
+    from utils import plagiarism_service
+
+    st.markdown("**抄袭检测**")
+    if st.button("🔍 检测疑似抄袭", key=f"plagiarism_run_{hid}"):
+        rows = []
+        for submission in submit_svc.list_submissions(session, hid):
+            try:
+                answers = json.loads(submission.answers_json or "{}")
+            except json.JSONDecodeError:
+                answers = {}
+            text = "。".join(str(v) for v in answers.values() if v)
+            rows.append({
+                "student_name": submission.student_name,
+                "answer": text,
+            })
+        st.session_state[f"plagiarism_payload_{hid}"] = (
+            plagiarism_service.detect_plagiarism(rows))
+
+    payload = st.session_state.get(f"plagiarism_payload_{hid}")
+    if payload is None:
+        return
+    if not payload["pairs"]:
+        st.info(payload["report"])
+        return
+    for index, pair in enumerate(payload["pairs"]):
+        with st.container(border=True):
+            st.caption(
+                f"{pair['student_a']} 与 {pair['student_b']}｜"
+                f"相似度 {pair['similarity'] * 100:.1f}%")
+            st.caption(f"甲：{pair['answer_a']}")
+            st.caption(f"乙：{pair['answer_b']}")
+            c1, c2 = st.columns(2)
+            if c1.button("确认", key=f"plagiarism_confirm_pair_{index}"):
+                st.toast("已标记确认。")
+            if c2.button("排除", key=f"plagiarism_dismiss_pair_{index}"):
+                st.toast("已排除该组。")
+
+
+def _render_completion_detail(session, hw):
+    """作业分析页展示完成度增强分析。"""
+    from utils import homework_analysis_service
+
+    with st.expander("📌 完成度分析", key=f"completion_detail_{hw.id}"):
+        data = homework_analysis_service.analyze_homework_completion(
+            session, hw.id)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("应到", data["total_students"])
+        c2.metric("已交", data["submitted_count"])
+        c3.metric("提交率",
+                  "—" if data["submission_rate"] is None
+                  else f"{data['submission_rate'] * 100:.1f}%")
+        c4.metric("按时率",
+                  "—" if data["on_time_rate"] is None
+                  else f"{data['on_time_rate'] * 100:.1f}%")
+        if data["average_minutes_before_due"] is not None:
+            st.caption(
+                f"平均距截止 {data['average_minutes_before_due']:g} 分钟提交。")
+
+        chart_mode = st.selectbox(
+            "图表口径", ["各题正确率", "平均得分率"],
+            key=f"completion_chart_mode_{hw.id}")
+        table = []
+        labels, rates = [], []
+        for item in data["questions"]:
+            labels.append(f"第{item['order']}题")
+            if chart_mode == "平均得分率":
+                value = item["score_rate"]
+                rates.append(value * 100 if value is not None else None)
+            else:
+                value = item["correct_rate"]
+                rates.append(value * 100 if value is not None else None)
+            table.append({
+                "题号": item["order"],
+                "作答人数": item["answered"],
+                "正确率": "—" if item["correct_rate"] is None
+                else f"{item['correct_rate'] * 100:.1f}%",
+                "平均得分率": "—" if item["score_rate"] is None
+                else f"{item['score_rate'] * 100:.1f}%",
+                "反推难度": item["inferred_difficulty"],
+            })
+        st.dataframe(pd.DataFrame(table), width="stretch", hide_index=True)
+        fig = go.Figure(go.Bar(
+            x=labels, y=rates,
+            text=[("—" if v is None else f"{v:.0f}%") for v in rates]))
+        fig.update_layout(
+            title=chart_mode, height=300, yaxis_range=[0, 100],
+            margin=dict(l=10, r=10, t=40, b=10))
+        st.plotly_chart(
+            fig, width="stretch",
+            key=f"completion_chart_{hw.id}")
+
+
+def _personalized_homework_panel():
+    """作业管理页底部的单学生个性化作业入口。"""
+    current_subject = fs.get_feature_subject(fs.HOMEWORK_LIST_SUBJECT)
+    with st.container(border=True):
+        st.markdown("**🎯 单学生个性化作业**")
+        if st.session_state.get("personalized_subject") not in SUBJECT_NAMES:
+            st.session_state["personalized_subject"] = current_subject
+        subject = st.selectbox(
+            "作业学科", SUBJECT_NAMES, key="personalized_subject")
+        with SessionLocal() as session:
+            students = student_svc.list_students(session)
+            if not students:
+                st.info("先添加学生后才能生成个性化作业。")
+                return
+            student_options = {
+                student.id: f"{student.name}（{student.class_name or '未分班'}）"
+                for student in students}
+            student_id = st.selectbox(
+                "选择学生", list(student_options),
+                format_func=lambda x: student_options[x],
+                key="personalized_student")
+            kp_text = st.text_input(
+                "指定知识点（可空；多个用逗号分隔）",
+                key="personalized_kps")
+            count = st.number_input(
+                "题目数量", min_value=1, max_value=30, value=10,
+                key="personalized_count")
+            if st.button("🚀 生成个性化作业",
+                         key="generate_personalized_homework"):
+                from utils import personalized_homework_service
+
+                kps = [item.strip() for item in re.split(
+                    r"[,，、;；]", kp_text) if item.strip()]
+                try:
+                    result = personalized_homework_service.generate_personalized_homework(
+                        session, student_id, subject,
+                        knowledge_points=kps or None, count=int(count))
+                    st.toast(f"已创建：{result['homework_name']}")
+                except ValueError as exc:
+                    st.warning(str(exc))
+
+
+
+
+
