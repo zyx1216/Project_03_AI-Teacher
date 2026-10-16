@@ -48,11 +48,17 @@ def is_toc_line(line: str) -> bool:
 
 
 def _chapter_level(title: str) -> int:
-    """章节层级：第X章/节/单元 → 1；X.X → 2；X.X.X → 3。"""
+    """章节层级：第X章/节/单元 → 1；X.X → 2；X.X.X → 3。
+
+    v3.5.3：固定栏目、"练习一"这类练习栏目、数字开头的课文标题都是 2。
+    """
     text = str(title or "").strip()
     if re.match(r"^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}\s+", text):
         return 3
     if re.match(r"^[0-9]{1,2}\.[0-9]{1,2}\s+", text):
+        return 2
+    if (column_heading_name(text) or is_practice_heading(text)
+            or is_numbered_lesson_title(text)):
         return 2
     return 1
 
@@ -60,6 +66,86 @@ def _chapter_level(title: str) -> int:
 def _is_review_title(title: str) -> bool:
     text = str(title or "").strip()
     return any(text == item or text.startswith(item) for item in _REVIEW_TITLES)
+
+
+# v3.5.3：语文 / 数学固定栏目（单独成行时算二级标题）
+_LANGUAGE_COLUMNS = ("口语交际", "习作例文", "习作", "语文园地",
+                     "综合性学习", "写字", "识字")
+_MATH_COLUMNS = ("数学好玩", "营养午餐")
+_COLUMN_NAMES = _LANGUAGE_COLUMNS + _MATH_COLUMNS
+_PRACTICE_RE = re.compile(r"^练习[一二三四五六七八九十百0-9]{1,3}$")
+# v3.5.3：X.X 编号标题的正文必须含文字，避免把"18.9 - 16.8"这类算式当章节
+_DOTTED_HEADING_RE = re.compile(
+    r"^\s*[0-9]{1,2}\.[0-9]{1,2}(?:\.[0-9]{1,2})?\s+(?P<tail>.+)$")
+_HEADING_LETTER_RE = re.compile(r"[A-Za-z\u4e00-\u9fff]")
+_HEADING_DECOR = "◎○●◆★☆※*＊◇"
+
+# v3.5.3：数字开头的课文标题（"1 大青树下的小学"、"1. 小熊购物"）
+_NUMBERED_LESSON_RE = re.compile(
+    r"^[0-9]{1,2}(?:[\.．][\s\u3000]*)?[\s\u3000]+(?P<title>\S.*)$")
+# 算式/习题提示语，用来把正文里的 "1. xxx" 排除在课文标题之外
+_FORMULA_RE = re.compile(r"[=×÷√≤≥≠≈]|[0-9]\s*[+\-]\s*[0-9]")
+_EXERCISE_WORDS = ("说一说", "算一算", "填一填", "画一画", "想一想", "读一读",
+                   "做一做", "猜一猜", "数一数", "比一比", "看一看", "量一量",
+                   "圈一圈", "连一连", "涂一涂", "摆一摆", "查一查")
+_HEADING_PUNCT = "，、；：。！？"
+
+
+def _compact_heading(line: str) -> str:
+    """去掉所有空白和目录装饰符号，用于固定栏目匹配。"""
+    text = re.sub(r"[\s\u3000]+", "", str(line or ""))
+    return text.lstrip(_HEADING_DECOR)
+
+
+def column_heading_name(line: str) -> Optional[str]:
+    """固定栏目名（口语交际/习作/语文园地/数学好玩…）；不是栏目返回 None。"""
+    text = _compact_heading(line)
+    if not text:
+        return None
+    for name in _COLUMN_NAMES:
+        if text == name:
+            return name
+    return None
+
+
+def is_practice_heading(line: str) -> bool:
+    """数学"练习一/练习1"这类练习栏目（不带其它文字）。"""
+    return bool(_PRACTICE_RE.match(_compact_heading(line)))
+
+
+def is_numbered_lesson_title(line: str) -> bool:
+    """数字开头的课文标题（"1 大青树下的小学"/"1. 小熊购物"）。
+
+    v3.5.3：只认"数字 + 空白"或"数字. + 空白"的写法；带算式、习题提示语、
+    句中标点的行都当正文，避免把习题编号误判成课文。
+    """
+    text = str(line or "").strip()
+    if not text or len(text) > 30:
+        return False
+    match = _NUMBERED_LESSON_RE.match(text)
+    if match is None:
+        return False
+    title = match.group("title").strip()
+    if len(title) < 2:
+        return False
+    if _FORMULA_RE.search(text):
+        return False
+    if any(char in title for char in _HEADING_PUNCT):
+        return False
+    if any(word in title for word in _EXERCISE_WORDS):
+        return False
+    # 词表/多段清单（如识字表的"1 山坡 学校 飘扬 …"）不是课文标题
+    if len(re.split(r"[\s\u3000]+", title)) >= 3:
+        return False
+    return True
+
+
+def _is_standalone_line(lines: list[str], index: int) -> bool:
+    """这一行前后都是空行（单独成行），用来判断课文标题。"""
+    before = lines[index - 1].strip() if index > 0 else ""
+    after = lines[index + 1].strip() if index + 1 < len(lines) else ""
+    return not before and not after
+
 
 _UNIT_STANDALONE_RE = re.compile(
     r"^\s*第\s*[0-9一二三四五六七八九十百零〇]+\s*单元\s*$")
@@ -274,13 +360,25 @@ def _normalize_text(text: str) -> str:
 
 
 def is_chapter_heading(line: str) -> bool:
-    """判断一行是不是章节标题。"""
-    line = line.strip()
+    """判断一行是不是章节标题。
+
+    v3.5.3：除"第X单元/章/节"和 X.X 编号外，还认固定栏目
+    （口语交际/习作/语文园地/数学好玩…）、"练习一"和数字开头的课文标题。
+    """
+    line = str(line or "").strip()
     if not line or len(line) > 50:
         return False
     # 句末标点通常说明这是正文句，避免“第一单元正文。”被误判成标题。
     if line[-1] in "。！？；，、":
         return False
+    if column_heading_name(line) or is_practice_heading(line):
+        return True
+    if is_numbered_lesson_title(line):
+        return True
+    dotted = _DOTTED_HEADING_RE.match(line)
+    if dotted is not None:
+        # "1.2 数轴" 算标题；"18.9 - 16.8" 这种没有文字的算式不算
+        return bool(_HEADING_LETTER_RE.search(dotted.group("tail")))
     return any(pattern.match(line) for pattern in _CHAPTER_PATTERNS)
 
 
@@ -299,12 +397,34 @@ def _merge_unit_title_lines(lines: list[str]) -> list[str]:
         if (index + 1 < len(lines) and _UNIT_STANDALONE_RE.match(title)):
             next_title = lines[index + 1].strip()
             if (next_title and len(next_title) < 20
+                    and not re.fullmatch(r"[0-9]{1,4}", next_title)
                     and not is_chapter_heading(next_title)):
                 merged.append(f"{title} {next_title}")
                 skip_next = True
                 continue
         merged.append(line)
     return merged
+
+
+def _heading_title(lines: list[str], index: int,
+                   stripped: str) -> Optional[str]:
+    """这一行若是章节标题，返回规范化的标题文本；不是标题返回 None。
+
+    v3.5.3 防误判：数字开头的课文标题必须前后都是空行（单独成行）才算章节，
+    正文里的 "1. 说一说" 这类习题编号只会留在章节正文里。
+    """
+    if not is_chapter_heading(stripped):
+        return None
+    column = column_heading_name(stripped)
+    if column:
+        return column
+    if is_practice_heading(stripped):
+        return _compact_heading(stripped)
+    if is_numbered_lesson_title(stripped):
+        if not _is_standalone_line(lines, index):
+            return None
+        return re.sub(r"[\s\u3000]+", " ", stripped)
+    return stripped
 
 
 def split_chapters(text: str) -> list[dict]:
@@ -314,6 +434,8 @@ def split_chapters(text: str) -> list[dict]:
     （level：第X章/节=1、X.X=2、X.X.X=3）与 display_title（父章 > 子节）；
     ③"整理与复习/本章小结"等复习小节归到所属章下（is_review=True）；
     ④真正空的章节丢弃（空的一级标题不单列，见子节的 display_title）。
+    v3.5.3：⑤固定栏目（口语交际/习作/语文园地/数学好玩…）、"练习一"和
+    数字开头的课文标题都算二级章节；⑥同名栏目加序号，避免下拉重复。
     没识别到任何章节标题时，整篇作为一个章节（标题"全文"）。
     """
     if not text.strip():
@@ -330,15 +452,15 @@ def split_chapters(text: str) -> list[dict]:
             entries.append(current)
         current = None
 
-    for line in lines:
+    for index, line in enumerate(lines):
         stripped = line.strip()
         if is_toc_line(line):
             continue                      # 目录行不计入章节内容
         if not found and _TOC_HEADER_RE.match(stripped):
             continue                      # 章前孤立的"目录"标题
-        if is_chapter_heading(line):
+        title = _heading_title(lines, index, stripped)
+        if title:
             _flush()
-            title = stripped
             review = _is_review_title(title)
             current = {
                 "title": title, "level": 2 if review else _chapter_level(title),
@@ -364,12 +486,17 @@ def split_chapters(text: str) -> list[dict]:
     # 丢弃空章节：空的一级标题不再单列，其标题已经作为子节的 parent
     # 出现在 display_title 里（如"第一章 有理数 > 1.1 正数和负数"）。
     result = []
+    seen_titles: dict[str, int] = {}
     for item in entries:
         if not item["content"]:
             continue
         parent = item.get("parent")
-        item["display_title"] = (f"{parent} > {item['title']}"
-                                 if parent else item["title"])
+        display = (f"{parent} > {item['title']}"
+                   if parent else item["title"])
+        # v3.5.3：同名的栏目（如两个单元的"口语交际"）加序号，避免下拉重复
+        count = seen_titles.get(display, 0) + 1
+        seen_titles[display] = count
+        item["display_title"] = f"{display}（{count}）" if count > 1 else display
         result.append(item)
     return result
 

@@ -61,10 +61,12 @@ def test_high_school_textbook_grade_detection():
     assert app_config.detect_grade_from_title("英语选择性必修") == "高三"
 
 
-def test_material_general_heading_rules_exclude_math_fun():
-    source = Path(material_service.__file__).read_text(encoding="utf-8")
-
-    assert "数学好玩" not in source
-    assert not material_service.is_chapter_heading("数学好玩")
+def test_material_math_fun_is_fixed_column_not_general_title():
+    """v3.5.3：数学好玩 走"数学固定栏目"白名单，不再靠通用短标题规则。"""
+    assert material_service.is_chapter_heading("数学好玩")
     chapters = material_service.split_chapters("数学好玩\n相关内容。")
-    assert not any(chapter["title"] == "数学好玩" for chapter in chapters)
+    chapter = next(c for c in chapters if c["title"] == "数学好玩")
+    assert chapter["level"] == 2
+    assert not chapter["is_review"]
+    # 白名单之外的短标题不识别（避免回到"短行即标题"）
+    assert not material_service.is_chapter_heading("数学乐园")

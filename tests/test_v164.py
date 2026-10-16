@@ -68,10 +68,14 @@ def test_unnumbered_lesson_titles_not_recognized():
 
 
 
-def test_math_fun_heading_not_recognized_as_general_title():
-    assert not material.is_chapter_heading("数学好玩")
+def test_math_fun_recognized_as_fixed_column_only():
+    """v3.5.3：数学好玩 作为数学固定栏目识别（v1.7.1 的"不做通用短标题"仍成立）。"""
+    assert material.is_chapter_heading("数学好玩")
     chapters = material.split_chapters("数学好玩\n对应内容。")
-    assert not any(c["title"] == "数学好玩" for c in chapters)
+    chapter = next(c for c in chapters if c["title"] == "数学好玩")
+    assert chapter["level"] == 2
+    # 不在栏目白名单里的短标题依旧不识别
+    assert not material.is_chapter_heading("快乐数学")
 
 
 @pytest.mark.parametrize("title", ["复习", "练习"])

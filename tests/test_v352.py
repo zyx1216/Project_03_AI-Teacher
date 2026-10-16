@@ -243,5 +243,5 @@ def test_student_report_title_has_no_stray_space():
 
 def test_version_and_database_unchanged():
     import config
-    assert config.APP_VERSION == "3.5.2"
+    assert config.APP_VERSION == "3.5.3"
     assert len(Base.metadata.tables) == 38
