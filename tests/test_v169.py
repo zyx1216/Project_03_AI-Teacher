@@ -215,6 +215,10 @@ def test_app_stash_current_question_group(tmp_path):
         {"题型": "选择题", "难度": 2, "数量": 5, "删除": False},
         {"题型": "填空题", "难度": 1, "数量": 3, "删除": False},
     ]
+    # v3.5.0：先把出题页年级切到三年级，与种子资料一致（脱离 user_config 影响）。
+    grade_box = next(x for x in at.selectbox if x.key == "question_gen_grade")
+    if grade_box.value != "三年级":
+        grade_box.set_value("三年级").run()
     # 通过控件交互更新，避免旧 Selectbox 的选项还没刷新。
     next(x for x in at.selectbox if x.key == "question_gen_material").set_value(1).run()
     next(x for x in at.selectbox if x.key == "question_gen_chapter").set_value(
@@ -249,6 +253,10 @@ def test_app_multiple_pending_groups_and_add_all_to_tasks(tmp_path):
     # 第一组：三年级，选择题 5 道
     import pandas as _pd
     first_rows = [{"题型": "选择题", "难度": 2, "数量": 5, "删除": False}]
+    # v3.5.0：显式把年级切到三年级（与种子资料一致，避免被学科+年级过滤）。
+    grade_box = next(x for x in at.selectbox if x.key == "question_gen_grade")
+    if grade_box.value != "三年级":
+        grade_box.set_value("三年级").run()
     next(x for x in at.selectbox if x.key == "question_gen_material").set_value(1).run()
     next(x for x in at.selectbox if x.key == "question_gen_chapter").set_value(
         "第一单元 混合运算").run()

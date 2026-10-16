@@ -140,7 +140,12 @@ def test_lesson_tab_with_material_has_no_exception(tmp_path):
         default_timeout=30)
     at.run()
     goto_sub(at, "lesson_plan_tab", "AI 备课", "📚 备课")
-    next(x for x in at.selectbox if x.key == "lesson_material_select").set_value(tb.id).run()
+    # v3.5.0：资料是「八年级」，必须先把年级切到初二，否则会被学科+年级筛选掉
+    # （此前测试依赖开发机上的 user_config 默认年级，属于环境依赖失败）。
+    next(x for x in at.selectbox
+         if x.key == "lesson_grade_select").set_value("初二").run()
+    next(x for x in at.selectbox
+         if x.key == "lesson_material_select").set_value(tb.id).run()
 
     assert not at.exception, [str(e) for e in at.exception]
     picker = next(x for x in at.multiselect if x.key == "lesson_chapter_select")

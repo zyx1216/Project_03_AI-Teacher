@@ -215,8 +215,50 @@ def detect_score_columns(df: pd.DataFrame) -> dict:
             "non_standard_subjects": non_standard_subjects}
 
 
+def _cell_blank(value) -> bool:
+    """单元格是否为空（与 _to_text 同口径）。"""
+    return _to_text(value) is None
+
+
+def fill_merged_columns(df: pd.DataFrame,
+                        columns) -> tuple[pd.DataFrame, list[str]]:
+    """把纵向合并单元格造成的空值向下填充。
+
+    Excel 里"班级"这类列常整列合并，pandas 只有左上角有值、其余读成空 ——
+    导入后学生会丢班级。这里按列 ffill 补上，并返回实际被填充的列名。
+    """
+    targets = [c for c in (columns or [])
+               if c is not None and c in getattr(df, "columns", [])]
+    if not targets:
+        return df, []
+    filled = df.copy()
+    changed: list[str] = []
+    for col in targets:
+        series = filled[col]
+        blank = series.map(_cell_blank)
+        if not blank.any():
+            continue
+        forward = series.ffill()
+        mask = blank & (~forward.map(_cell_blank))
+        if mask.any():
+            filled[col] = forward
+            changed.append(str(col))
+    return filled, changed
+
+
 def extract_students(df: pd.DataFrame, mapping: dict) -> list[dict]:
-    """按识别出的列映射，把学生表提取成记录；缺姓名的行进 problems。"""
+    """按识别出的列映射，把学生表提取成记录；缺姓名的行进 problems。
+
+    v3.5.0：先剔除整行空白（否则向下填充会把上一行班级带进空行），
+    再对班级/学号列向下填充，兼容纵向合并单元格的名单表。
+    """
+    mapped_cols = [c for c in mapping.values() if c is not None]
+    if mapped_cols:
+        blank_row = df[mapped_cols].apply(
+            lambda row: all(_cell_blank(v) for v in row), axis=1)
+        df = df.loc[~blank_row]
+    df, _filled = fill_merged_columns(
+        df, [mapping.get("class_name"), mapping.get("student_no")])
     records = []
     for row_no, (_, row) in enumerate(df.iterrows(), start=2):  # Excel 第1行是表头
         name = _to_text(row[mapping["name"]]) if mapping["name"] else None
@@ -304,7 +346,11 @@ def parse_long_table(df: pd.DataFrame) -> Optional[list[dict]]:
     return records
 
 def extract_scores(df: pd.DataFrame, detected: dict) -> list[dict]:
-    """按识别结果把成绩表提取成记录；缺姓名标问题，缺考科目分数留 None。"""
+    """按识别结果把成绩表提取成记录；缺姓名标问题，缺考科目分数留 None。
+
+    v3.5.0：班级列同样向下填充，避免合并单元格导致成绩丢班级归属。
+    """
+    df, _filled = fill_merged_columns(df, [detected.get("class_col")])
     name_col = detected["name_col"]
     class_col = detected["class_col"]
     subjects = detected["subjects"]

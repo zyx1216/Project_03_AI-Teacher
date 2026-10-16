@@ -1,0 +1,125 @@
+######################################################################
+# A. 学生名单导入
+######################################################################
+======================================================================
+### A1 标准列名（姓名/学号/班级/性别）
+-- 表头: ['姓名', '学号', '班级', '性别']
+-- 学生列识别 mapping: {'name': '姓名', 'student_no': '学号', 'class_name': '班级', 'gender': '性别', 'remark': None}
+-- problems: []
+    {'row_no': 2, 'name': '张三', 'student_no': '1001', 'class_name': '高一1班', 'gender': '男', 'remark': None, 'problems': []}
+    {'row_no': 3, 'name': '李四', 'student_no': '1002', 'class_name': '高一1班', 'gender': '女', 'remark': None, 'problems': []}
+======================================================================
+### A2 别名混用（学生姓名/name/行政班/sex）
+-- 表头: ['学生姓名', 'no', '行政班', 'sex']
+-- 学生列识别 mapping: {'name': '学生姓名', 'student_no': 'no', 'class_name': '行政班', 'gender': 'sex', 'remark': None}
+-- problems: []
+    {'row_no': 2, 'name': '王五', 'student_no': '2001', 'class_name': '初二3班', 'gender': '男', 'remark': None, 'problems': []}
+    {'row_no': 3, 'name': '赵六', 'student_no': '2002', 'class_name': '初二3班', 'gender': '女', 'remark': None, 'problems': []}
+======================================================================
+### A3 列序乱 + 冷门字段（民族/家庭住址/家长联系方式）
+-- 表头: ['班级', '家庭住址', '姓名', '民族', '家长联系方式', '性别']
+-- 学生列识别 mapping: {'name': '姓名', 'student_no': None, 'class_name': '班级', 'gender': '性别', 'remark': None}
+-- problems: []
+    {'row_no': 2, 'name': '孙七', 'student_no': None, 'class_name': '初一2班', 'gender': '男', 'remark': None, 'problems': []}
+======================================================================
+### A4 合并单元格（班级列 A2:A4 合并）
+-- 表头: ['姓名', '班级', '性别']
+-- 学生列识别 mapping: {'name': '姓名', 'student_no': None, 'class_name': '班级', 'gender': '性别', 'remark': None}
+-- problems: []
+    {'row_no': 2, 'name': '甲', 'student_no': None, 'class_name': '高一2班', 'gender': '男', 'remark': None, 'problems': []}
+    {'row_no': 3, 'name': '乙', 'student_no': None, 'class_name': None, 'gender': '女', 'remark': None, 'problems': []}
+    {'row_no': 4, 'name': '丙', 'student_no': None, 'class_name': None, 'gender': '男', 'remark': None, 'problems': []}
+======================================================================
+### A5 缺姓名列（只有学号/班级）
+-- 表头: ['学号', '班级']
+-- 学生列识别 mapping: {'name': None, 'student_no': '学号', 'class_name': '班级', 'gender': None, 'remark': None}
+-- problems: ['没有识别到姓名列（需要包含“姓名”列）']
+    {'row_no': 2, 'name': None, 'student_no': '3001', 'class_name': '初三1班', 'gender': None, 'remark': None, 'problems': ['缺姓名']}
+======================================================================
+### A6 空行 + 空列脏数据
+-- 表头: ['姓名', 'Unnamed: 1', '班级']
+-- 学生列识别 mapping: {'name': '姓名', 'student_no': None, 'class_name': '班级', 'gender': None, 'remark': None}
+-- problems: []
+    {'row_no': 3, 'name': '丁', 'student_no': None, 'class_name': '高二1班', 'gender': None, 'remark': None, 'problems': []}
+    {'row_no': 5, 'name': '戊', 'student_no': None, 'class_name': '高二1班', 'gender': None, 'remark': None, 'problems': []}
+
+######################################################################
+# B. 成绩表导入
+######################################################################
+======================================================================
+### B1 标准成绩表（含总分/平均分/排名列）
+-- 表头: ['姓名', '班级', '语文', '数学', '英语', '总分', '平均分', '名次']
+-- name_col: 姓名 | class_col: 班级
+-- subjects: [('语文', '语文'), ('数学', '数学'), ('英语', '英语')]
+-- problems: []
+    {'row_no': 2, 'name': '张三', 'class_name': '高一1班', 'scores': {'语文': 88.0, '数学': 92.0, '英语': 85.0}, 'problems': []}
+    {'row_no': 3, 'name': '李四', 'class_name': '高一1班', 'scores': {'语文': 76.0, '数学': 64.0, '英语': 80.0}, 'problems': []}
+======================================================================
+### B2 缺考/空值/负分/超范围分（999）
+-- 表头: ['姓名', '数学', '语文']
+-- name_col: 姓名 | class_col: None
+-- subjects: [('数学', '数学'), ('语文', '语文')]
+-- problems: []
+    {'row_no': 2, 'name': '甲', 'class_name': None, 'scores': {'数学': None, '语文': 80.0}, 'problems': ['缺分科目：数学']}
+    {'row_no': 3, 'name': '乙', 'class_name': None, 'scores': {'数学': None, '语文': 70.0}, 'problems': ['缺分科目：数学']}
+    {'row_no': 4, 'name': '丙', 'class_name': None, 'scores': {'数学': None, '语文': 60.0}, 'problems': ['缺分科目：数学']}
+    {'row_no': 5, 'name': '丁', 'class_name': None, 'scores': {'数学': 999.0, '语文': 50.0}, 'problems': []}
+======================================================================
+### B3 科目带后缀（数学成绩/英语分数/chinese）
+-- 表头: ['姓名', '数学成绩', '英语分数', 'chinese']
+-- name_col: 姓名 | class_col: None
+-- subjects: [('数学成绩', '数学'), ('英语分数', '英语'), ('chinese', '语文')]
+-- problems: []
+    {'row_no': 2, 'name': '甲', 'class_name': None, 'scores': {'数学': 90.0, '英语': 88.0, '语文': 77.0}, 'problems': []}
+======================================================================
+### B4 长表（姓名/科目/分数）
+-- 表头: ['姓名', '科目', '分数']
+-- parse_long_table: [{'row_no': 2, 'name': '甲', 'class_name': None, 'scores': {'数学': 90.0, '语文': 80.0}, 'problems': []}, {'row_no': 4, 'name': '乙', 'class_name': None, 'scores': {'数学': 70.0}, 'problems': []}]
+======================================================================
+### B5 非标科目（科学 / 道德与法治）
+-- 表头: ['姓名', '科学', '道德与法治']
+-- name_col: 姓名 | class_col: None
+-- subjects: [('科学', '科学'), ('道德与法治', '道德与法治')]
+-- problems: []
+    {'row_no': 2, 'name': '甲', 'class_name': None, 'scores': {'科学': 85.0, '道德与法治': 90.0}, 'problems': []}
+
+######################################################################
+# C. 归一化函数边界
+######################################################################
+normalize_gender 取值:
+   '男'          -> '男'
+   '男生'         -> '男'
+   'M'          -> '男'
+   'male'       -> '男'
+   '1'          -> '男'
+   '女'          -> '女'
+   '女生'         -> '女'
+   'F'          -> '女'
+   'female'     -> '女'
+   '0'          -> '女'
+   ''           -> None
+   None         -> None
+   '未知'         -> None
+normalize_subject_name 取值:
+   '数学'         -> '数学'
+   '数学成绩'       -> '数学'
+   'Math'       -> '数学'
+   '数学 成绩'      -> '数学'
+   '语 文'        -> '语文'
+   '英语分'        -> None
+   '科学'         -> None
+   '道德与法治'      -> None
+   ''           -> None
+_to_score 取值（含常见脏值）:
+   90           -> 90.0
+   '90'         -> 90.0
+   '90分'        -> 90.0
+   ''           -> None
+   None         -> None
+   -1           -> None
+   '缺考'         -> None
+   '未交'         -> None
+   '免考'         -> None
+   999          -> 999.0
+   1000000000.0 -> 1000000000.0
+   '90.5'       -> 90.5

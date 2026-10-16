@@ -14,10 +14,43 @@ import config
 
 USER_CONFIG_FILE = Path(config.DATA_DIR) / "user_config.json"
 
+# v3.5.0：学校信息（试卷导出头部用），单独一个文件，避免和界面偏好混在一起。
+SCHOOL_PROFILE_FILE = Path(config.DATA_DIR) / "school_profile.json"
+DEFAULT_SCHOOL_PROFILE = {"school_name": ""}
+
 # 默认配置：新用户默认一年级
 DEFAULT_CONFIG = {
     "last_grade_display": "一年级",  # 界面显示口径的年级
 }
+
+
+def load_school_profile() -> dict:
+    """读学校信息；文件缺失或损坏时回退空值，不覆盖原文件。"""
+    if SCHOOL_PROFILE_FILE.exists():
+        try:
+            with open(SCHOOL_PROFILE_FILE, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            result = dict(DEFAULT_SCHOOL_PROFILE)
+            result.update({k: v for k, v in saved.items() if v is not None})
+            return result
+        except (OSError, json.JSONDecodeError):
+            pass
+    return dict(DEFAULT_SCHOOL_PROFILE)
+
+
+def save_school_profile(**kwargs) -> dict:
+    """保存学校信息（合并更新）。"""
+    config.ensure_dirs()
+    current = load_school_profile()
+    current.update({k: v for k, v in kwargs.items() if v is not None})
+    with open(SCHOOL_PROFILE_FILE, "w", encoding="utf-8") as f:
+        json.dump(current, f, ensure_ascii=False, indent=2)
+    return current
+
+
+def school_name() -> str:
+    """当前学校名称（未配置返回空串）。"""
+    return str(load_school_profile().get("school_name") or "").strip()
 
 
 def load_user_config() -> dict:

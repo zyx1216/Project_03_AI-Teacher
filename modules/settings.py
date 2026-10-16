@@ -288,6 +288,24 @@ def _backup_restore_panel():
 
 
 
+def _school_profile_panel() -> None:
+    """学校信息（v3.5.0）：试卷导出头部用到的学校名称。"""
+    from utils import user_config
+
+    st.subheader("🏫 学校信息")
+    st.caption("这里填写的学校名称会出现在导出的试卷头部（居中）。")
+    current = user_config.load_school_profile()
+    c1, c2 = st.columns([3, 1])
+    name = c1.text_input("学校名称", value=current.get("school_name") or "",
+                         key="school_name_input",
+                         placeholder="如：桂林电子科技大学附属中学")
+    if c2.button("💾 保存", key="school_profile_save",
+                 use_container_width=True):
+        user_config.save_school_profile(school_name=name.strip())
+        st.toast("学校信息已保存。")
+        st.rerun()
+
+
 def _recycle_bin_panel() -> None:
     """回收站：查看、恢复、永久删除、清空（保留 30 天）。"""
     from utils import recycle_service
@@ -607,6 +625,8 @@ def show() -> None:
     _data_panel()
     st.divider()
     _backup_restore_panel()
+    st.divider()
+    _school_profile_panel()
     st.divider()
     _recycle_bin_panel()
     st.divider()

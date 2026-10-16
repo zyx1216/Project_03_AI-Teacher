@@ -259,6 +259,14 @@ def _student_import_panel():
         st.error("　".join(detected["problems"]))
         return
 
+    # v3.5.0：纵向合并的班级/学号列只有首行有值，先向下填充再提取。
+    df, _filled_cols = eh.fill_merged_columns(
+        df, [detected["mapping"].get("class_name"),
+             detected["mapping"].get("student_no")])
+    if _filled_cols:
+        st.info("检测到合并单元格，已自动向下填充："
+                + "、".join(_filled_cols) + "，请确认数据是否正确。")
+
     records = eh.extract_students(df, detected["mapping"])
     if not records:
         st.warning("表里没有有效学生行。")
@@ -893,6 +901,12 @@ def _score_import_panel():
         non_standard = detected.get("non_standard_subjects", [])
         st.toast(f"识别到姓名列「{detected['name_col']}」，科目："
                    + "、".join(score_cols))
+        # v3.5.0：班级列若纵向合并，同样先向下填充。
+        df, _score_filled = eh.fill_merged_columns(
+            df, [detected.get("class_col")])
+        if _score_filled:
+            st.info("检测到合并单元格，已自动向下填充："
+                    + "、".join(_score_filled) + "，请确认数据是否正确。")
         records = eh.extract_scores(df, detected)
 
     # 非标科目保留原值入库（不阻断），只提示其不计入九科分析。

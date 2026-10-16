@@ -136,14 +136,48 @@ def _latex_escape(seg: str) -> str:
 
 
 def homework_latex(homework, pairs) -> str:
-    """作业导出为 ctexart LaTeX 源码。pairs 为 [(关联行, 题目)]。"""
+    """作业/试卷导出为 ctexart LaTeX 源码。pairs 为 [(关联行, 题目)]。
+
+    v3.5.0：试卷（homework_type=exam）补密封线、注意事项、逐题分值与得分栏；
+    普通作业保持原来的题目列表。
+    """
+    from utils import question_service as qs
+    from utils import user_config
+
+    is_exam = getattr(homework, "homework_type", "") == "exam"
     lines = [
         "\\documentclass{ctexart}",
         "\\usepackage[a4paper,margin=2.2cm]{geometry}",
         "\\usepackage{amsmath,amssymb}",
         "\\begin{document}",
-        f"\\section*{{{_latex_text(homework.name)}}}",
     ]
+    scores = {}
+    for link, question in pairs:
+        if getattr(link, "score", None) is not None:
+            scores[question.id] = link.score
+    if is_exam:
+        school = user_config.school_name() or "＿＿＿＿＿＿＿＿"
+        notice = qs.exam_notice_lines({
+            "total_score": getattr(homework, "total_score", None),
+            "duration": getattr(homework, "duration", None)})
+        lines += [
+            "\\begin{center}{\\heiti\\zihao{2}" + _latex_text(school)
+            + "}\\\\ {\\heiti\\zihao{1}" + _latex_text(homework.name)
+            + "}\\end{center}",
+            "% 密封线（简化：左列竖排文字，未做跨页竖线）",
+            "\\noindent\\begin{minipage}[t]{0.13\\textwidth}",
+            "\\centering\\scriptsize " + "\\\\".join("密封线内不要答题"),
+            "\\end{minipage}\\hfill",
+            "\\begin{minipage}[t]{0.84\\textwidth}",
+            "班级：\\underline{\\hspace{3em}}\\quad "
+            "姓名：\\underline{\\hspace{3em}}\\quad "
+            "学号：\\underline{\\hspace{3em}}\\quad "
+            "得分：\\underline{\\hspace{3em}}\\\\",
+            "\\footnotesize \\textbf{注意事项：} " + "\\\\".join(_latex_text(x) for x in notice),
+            "\\end{minipage}\\par\\vspace{1em}",
+        ]
+    else:
+        lines.append(f"\\section*{{{_latex_text(homework.name)}}}")
     current_type = None
     type_names = {"choice": "一、选择题", "fill": "二、填空题",
                   "judge": "三、判断题", "solution": "四、解答题"}
@@ -151,9 +185,15 @@ def homework_latex(homework, pairs) -> str:
         if q.question_type != current_type:
             current_type = q.question_type
             lines.append(f"\\subsection*{{{type_names.get(current_type, '题目')}}}")
-        lines.append(f"{index}. {_latex_text(q.content)}")
+        score = scores.get(q.id)
+        score_txt = f"（{float(score):g}分）" if score else ""
+        lines.append(f"{index}.{score_txt} {_latex_text(q.content)}")
         if q.answer:
             lines.append("")
+    if is_exam:
+        lines.append("\\vspace{1em}\\noindent\\textbf{得分栏：}"
+                     "题号 \\underline{\\hspace{2em}} "
+                     "得分 \\underline{\\hspace{2em}}")
     lines.append("\\end{document}")
     return "\n".join(lines)
 
@@ -503,54 +543,186 @@ def docx_from_school_template(template_path, mapping: dict) -> bytes:
     return buffer.getvalue()
 
 
-def standard_exam_docx(homework, questions, *, school: str = "",
-                       with_answer: bool = False,
-                       header: str = "", footer: str = "") -> bytes:
-    """按标准试卷格式导出 Word：密封线、题号、分值，可选答案与页眉页脚。"""
+def _apply_docx_header_footer(data: bytes, header: str, footer: str) -> bytes:
+    """给 Word 加页眉/页脚文本（标准试卷可选）。"""
     from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-    from docx.shared import Pt
 
-    doc = Document()
-    style = doc.styles["Normal"]
-    style.font.name = "宋体"
-    style.font.size = Pt(10.5)
-
-    sealed = doc.add_table(rows=1, cols=1)
-    cell = sealed.cell(0, 0)
-    cell.text = (f"学校：{school or '＿＿＿＿'}　班级：＿＿＿＿　"
-                 "姓名：＿＿＿＿　学号：＿＿＿＿")
-    cell.paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.LEFT
-
-    heading = doc.add_paragraph()
-    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = heading.add_run(getattr(homework, "name", "") or "试卷")
-    run.bold = True
-    run.font.size = Pt(16)
-
-    meta = doc.add_paragraph()
-    meta.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    minutes = getattr(homework, "duration", None)
-    meta.add_run(f"满分 {getattr(homework, 'total_score', None) or '—'} 分"
-                 + (f"　考试时间 {minutes} 分钟" if minutes else ""))
-
-    for index, (link, question) in enumerate(questions, start=1):
-        paragraph = doc.add_paragraph()
-        score = getattr(link, "score", None)
-        prefix = f"{index}. "
-        if score:
-            prefix += f"（{score} 分）"
-        paragraph.add_run(prefix + str(getattr(question, "content", "")))
-        if with_answer:
-            answer = doc.add_paragraph()
-            answer.add_run(f"答案：{getattr(question, 'answer', '') or '—'}")
-            answer.runs[0].font.size = Pt(9)
-    if header:
-        for section in doc.sections:
+    doc = Document(io.BytesIO(data))
+    for section in doc.sections:
+        if header:
             section.header.paragraphs[0].text = header
-    if footer:
-        for section in doc.sections:
+        if footer:
             section.footer.paragraphs[0].text = footer
     buffer = io.BytesIO()
     doc.save(buffer)
+    return buffer.getvalue()
+
+
+def standard_exam_docx(homework, questions, *, school: str = "",
+                       with_answer: bool = False,
+                       header: str = "", footer: str = "",
+                       question_scores: dict | None = None,
+                       specification_table: dict | None = None) -> bytes:
+    """标准试卷 Word。
+
+    v3.5.0：改为薄封装——与作业/试卷导出（homework_service.export_word）
+    共用 question_service 里的同一套"标准试卷外壳"，避免两条路径要素不一致。
+    questions 支持 [(HomeworkQuestion, Question), ...] 或 [Question, ...]。
+    """
+    from utils import question_service as qs
+    from utils import user_config
+
+    plain: list = []
+    scores = dict(question_scores or {})
+    for item in questions or []:
+        # 兼容三种形态：Question / (link, Question) 元组 / SQLAlchemy Row
+        if hasattr(item, "question_type"):
+            plain.append(item)
+            continue
+        try:
+            link, question = item
+        except (TypeError, ValueError):
+            continue
+        if not hasattr(question, "question_type"):
+            continue
+        plain.append(question)
+        if getattr(link, "score", None) is not None:
+            scores.setdefault(question.id, link.score)
+
+    meta = {
+        "school": school or user_config.school_name(),
+        "total_score": getattr(homework, "total_score", None),
+        "duration": getattr(homework, "duration", None),
+    }
+    data = qs.export_questions_word(
+        plain, with_answer=with_answer,
+        title=getattr(homework, "name", "") or "试卷",
+        specification_table=specification_table,
+        exam_meta=meta, question_scores=scores or None)
+    if header or footer:
+        data = _apply_docx_header_footer(data, header, footer)
+    return data
+
+
+# ---------------------------------------------------------------------------
+# v3.5.0：标准试卷 PDF（PyMuPDF Story，内容与 Word 版一致）
+# ---------------------------------------------------------------------------
+
+def _stacked(text: str) -> str:
+    """逐字换行，模拟竖排（Story 不支持 writing-mode）。"""
+    return "<br>".join(list(str(text or "")))
+
+
+def _exam_html(homework, pairs, *, school: str = "", with_answer: bool = False,
+               question_scores: dict | None = None) -> str:
+    """标准试卷的 HTML（与 Word 版同一套要素）。"""
+    from utils import question_service as qs
+
+    scores = dict(question_scores or {})
+    for link, question in pairs:
+        if getattr(link, "score", None) is not None:
+            scores.setdefault(question.id, link.score)
+    meta = {"school": school,
+            "total_score": getattr(homework, "total_score", None),
+            "duration": getattr(homework, "duration", None)}
+    notices = qs.exam_notice_lines(meta)
+    parts = [
+        "<html><head><meta charset='utf-8'><style>",
+        "@page { margin: 42px 40px; }",
+        "body { font-size: 12pt; line-height: 1.6; color: #000; }",
+        ".school { text-align: center; font-size: 22pt; font-weight: bold; }",
+        ".title { text-align: center; font-size: 24pt; font-weight: bold;"
+        " margin: 6px 0 10px; }",
+        "table.seal { width: 100%; border-collapse: collapse; margin-bottom: 8px; }",
+        "td.seal-line { width: 2cm; text-align: center; font-size: 9pt;"
+        " border-right: 1px dashed #808080; vertical-align: top; }",
+        "td.info { padding-left: 8px; font-size: 12pt; vertical-align: top; }",
+        ".notice { font-size: 9pt; color: #333; }",
+        ".q { margin: 8px 0 0; }",
+        "table.score { border-collapse: collapse; margin: 6px 0 10px; }",
+        "table.score td { border: 1px solid #666; width: 32px; height: 20px;"
+        " text-align: center; font-size: 9pt; }",
+        "</style></head><body>",
+        f"<div class='school'>{html.escape(meta['school'] or '＿＿＿＿＿＿＿＿')}</div>",
+        f"<div class='title'>"
+        f"{html.escape(str(getattr(homework, 'name', '') or '试卷'))}</div>",
+    ]
+    if not with_answer:
+        info = ("班级：__________　姓名：__________　学号：__________　"
+                "分数：__________")
+        parts.append(
+            "<table class='seal'><tr>"
+            f"<td class='seal-line'>{_stacked(qs.EXAM_SEAL_TEXT)}</td>"
+            f"<td class='info'>{html.escape(info)}<br>"
+            "<b>注意事项：</b><br>"
+            + "<br>".join(html.escape(x) for x in notices)
+            + "</td></tr></table>")
+        total_q = len(pairs)
+        for begin in range(1, max(total_q, 1) + 1, 10):
+            numbers = list(range(begin, min(begin + 10, total_q + 1)))
+            if not numbers:
+                continue
+            head = "".join(f"<td>{n}</td>" for n in numbers)
+            blank = "".join("<td></td>" for _ in numbers)
+            parts.append(
+                f"<table class='score'><tr><td>题号</td>{head}</tr>"
+                f"<tr><td>得分</td>{blank}</tr></table>")
+    else:
+        parts.append("<div class='notice'>"
+                     + "<br>".join(html.escape(x) for x in notices)
+                     + "</div>")
+
+    for index, (link, question) in enumerate(pairs, start=1):
+        score = scores.get(question.id)
+        score_txt = f"{float(score):g}分" if score else ""
+        content = str(question.content or "")
+        option_lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        if with_answer:
+            head = (f"{index}.（{score_txt}）" if score_txt else f"{index}.")
+            parts.append(f"<p class='q'><b>{html.escape(head)}</b></p>")
+            for line in option_lines:
+                parts.append(f"<p>{html.escape(line)}</p>")
+            parts.append(
+                f"<p><b>【答案】</b>{html.escape(str(question.answer or ''))}</p>")
+            if question.analysis:
+                parts.append(
+                    f"<p><b>【解析】</b>{html.escape(str(question.analysis))}</p>")
+        else:
+            head = f"{index}.（{score_txt}）" if score_txt else f"{index}."
+            if option_lines:
+                parts.append(
+                    f"<p class='q'>{html.escape(head + ' ' + option_lines[0])}</p>")
+                for line in option_lines[1:]:
+                    parts.append(f"<p>{html.escape(line)}</p>")
+            else:
+                parts.append(f"<p class='q'>{html.escape(head)}</p>")
+        parts.append("<p></p>")
+    parts.append("</body></html>")
+    return "".join(parts)
+
+
+def exam_pdf(homework, pairs, *, school: str = "", with_answer: bool = False,
+             question_scores: dict | None = None) -> bytes:
+    """标准试卷 PDF（PyMuPDF Story 直出，支持中文，内容与 Word 一致）。"""
+    import pymupdf
+
+    from utils import user_config
+
+    page_html = _exam_html(
+        homework, pairs, school=school or user_config.school_name(),
+        with_answer=with_answer, question_scores=question_scores)
+    archive, font_css = _pdf_archive()
+    page_html = page_html.replace("</style>", font_css + "</style>", 1)
+    story = pymupdf.Story(html=page_html, archive=archive)
+    buffer = io.BytesIO()
+    writer = pymupdf.DocumentWriter(buffer)
+    mediabox = pymupdf.paper_rect("a4")
+    while True:
+        dev = writer.begin_page(mediabox)
+        more, _ = story.place(mediabox + (40, 42, -40, -42))
+        story.draw(dev)
+        writer.end_page()
+        if not more:
+            break
+    writer.close()
     return buffer.getvalue()

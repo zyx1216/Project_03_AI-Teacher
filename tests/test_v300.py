@@ -11,7 +11,7 @@ from models.models import Base
 
 
 def test_version_and_database_unchanged():
-    assert config.APP_VERSION == "3.4.1"
+    assert config.APP_VERSION == "3.5.0"
     assert len(Base.metadata.tables) == 38
 
 

@@ -85,7 +85,8 @@ def _context_dialog() -> None:
         book_labels = ["不关联资料"] + [book.name for book in books]
         selected_book = st.selectbox(
             "选择资料", book_options,
-            format_func=lambda x: book_labels[book_options.index(x)],
+            format_func=lambda x: (book_labels[book_options.index(x)]
+                                if x in book_options else x),
             key="ai_ctx_book")
         chapters = (_load_material_chapters(selected_book)
                     if selected_book else [])

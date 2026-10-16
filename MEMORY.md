@@ -2,6 +2,18 @@
 
 > 项目长期记忆：架构决策、设计取舍、踩过的坑、我的纠正、重要外部资源。
 > 规则：不记密钥/密码/Token（只记"密钥放在哪里"）；代码里一眼能看出来的东西不抄；最新记录置顶。
+## v3.5.0（高严重度问题修复）新增
+- 架构决策（2026-10-16）：
+  - **试卷导出单一实现**：`question_service.export_questions_word(..., exam_meta=None, question_scores=None)` 是唯一外壳；`exam_meta` 非空才输出标准试卷（学校名/密封线/注意事项/逐题分值/得分栏），为空保持「习题卷」原样（普通作业、题库导出）。`export_service.standard_exam_docx` 只是薄封装；`export_service.exam_pdf` 用 PyMuPDF Story 与 Word 同内容；`homework_latex` 按 `homework_type=="exam"` 补要素。
+  - **学校信息**：`data/school_profile.json`（`user_config.load_school_profile/save_school_profile/school_name`），设置页「🏫 学校信息」维护；未配置时学校名显示下划线占位。
+  - **合并单元格**：`excel_handler.fill_merged_columns(df, columns) -> (df, filled_cols)`；`extract_students`/`extract_scores` 内部兜底 ffill；**必须先剔除整行空白再 ffill**，否则空行会被上一行班级填满、破坏"跳过空行"的既有行为（v3.5.0 踩过一次，test_excel_import 抓到）。
+  - **`.index()` 加固口径**：命中才取，未命中**返回原值**（不是占位文案、也不要吞异常）。
+- 踩坑（2026-10-16）：
+  - **AppTest 的 `_widget_state` 每次 run 都会算 `options.index(format_func(value))`**：所以 `format_func` 若把异常吞掉、返回"（已失效…）"这类占位文案，会让 AppTest 直接 `ValueError: '<占位文案>' is not in list`；正确做法是未命中返回原值——AppTest 对"format_func 抛异常且入参是字符串"自带回退（`_format_value_for_widget`）。修 `.index()` 时别用占位文案。
+  - **测试里 `set_value(<原始 id>)` 要求该值在当前选项内**：跨学科/年级改选中值的测试必须先切年级再选资料（v164/v169/v170 都是这个坑）。
+  - **`_isolated_app_code` 之前没隔离 `user_config`**，AppTest 默认年级会跟着开发机真实配置变；v3.5.0 已补隔离（`__USERCONFIGFILE__`）。
+- 验证（2026-10-16）：全量 **1202 passed / 0 failed**（全绿；历史预存失败 `tests/test_v164.py::test_lesson_tab_with_material_has_no_exception` 已随本次修复转绿）。。
+
 ## v3.4.1（侧边栏布局 + AI助手上下文 + 模型设置优化）新增
 - 架构决策（2026-10-02）：
   - **顶层路由只有 9 个**：`🏠 首页`/`🤖 AI助手`/`📊 数据看板`/`📂 资源中心`/`🎓 教学工具`/`📚 备课`/`📝 学业测评`/`📊 学情`/`⚙️ 设置`。教学日历、课堂互动、我的模板、教学反思**不再是顶层页**，跳转统一走「折叠组 + 子项」（测试里用 `goto_sub(at, "teaching_tab", "📅 教学日历", "🎓 教学工具")`）。

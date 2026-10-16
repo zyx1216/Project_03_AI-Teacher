@@ -1,4 +1,4 @@
-# AI教学辅助 · AGENTS.md（v3.4.1 布局与助手优化）
+# AI教学辅助 · AGENTS.md（v3.5.0 高严重度问题修复）
 
 > 本文件只在本项目目录内生效；全局规则见 `~/.codex/AGENTS.md`，此处不复制。
 
@@ -19,6 +19,7 @@
 - 注意：中文输出场景直接用 `C:\Users\zyx\.conda\envs\math_teacher\python.exe`，不要用 `conda run`（GBK 回显会崩）。
 
 ## 架构约定
+- v3.5.0 起修高严重度问题。数据库仍 **38 张**，0 新依赖；新增本地配置 `data/school_profile.json`（学校名称）。试卷导出统一到 `question_service.export_questions_word(..., exam_meta=, question_scores=)` 一套外壳（学校名/密封线/注意事项/逐题分值/得分栏），`export_service.standard_exam_docx` 为薄封装、`export_service.exam_pdf` 用 PyMuPDF Story 出 PDF、`homework_latex` 按 `homework_type=="exam"` 补要素；普通作业与题库导出不套密封线。`excel_handler.fill_merged_columns` 处理纵向合并单元格（先剔空行再 ffill），学生/成绩导入均已接入。`.index()` 加固口径：命中才取、未命中返回原值（**不要返回占位文案**，会让 AppTest 的 `options.index(format_func(value))` 直接报错）。测试基建：`_isolated_app_code` 已隔离 `user_config`。
 - v3.4.1 起调整侧边栏布局与助手体验。数据库仍 **38 张**，无表结构变化。顶层路由固定 9 项（首页/AI助手/数据看板/资源中心/教学工具/备课/学业测评/学情/设置）；**教学日历、课堂互动、我的模板、教学反思不再是顶层页**，跳转必须走「折叠组 + 子项」（`resource_tab`/`teaching_tab`）。`lesson_plan_tab` 默认值改为「AI 备课」，「资料管理」在资源中心。旧状态迁移用四元组 `(顶级页, 目标子key, 子值, 额外状态)`（app.py `_LEGACY_SUB_MIGRATION`）。AI 助手上下文弹窗在按钮里直接调用、不用 session_state 中转（`ai_ctx_open` 已删），章节走资料联动。模型下拉标签走 `settings._model_option_labels()`，不含状态词。
 - v3.4.0 起做教师端功能增强（第三批）。数据库 **38 张**（新增 `parent_communication`/`version_history`/`recycle_bin`/`export_templates`；`comment_templates` 复用旧表），迁移 `v3_4_0_impl.py` + `v3_4_0_migration.py`；BUSINESS_TABLES/清空数量同步 38。新增服务：`version_service`（作业/试卷版本快照/对比/回滚，上限读 `data/version_settings.json`，默认 10）、`recycle_service`（硬删前快照，支持恢复/永久删除/清空/30 天过期）、`parent_communication_service`（成绩单/学习建议/班级报告/批量 ZIP/留档）、`export_template_service`（学校模板上传/默认/预览）；`export_service` 增 styled_excel/multi_sheet_excel/fill_school_template/pdf_with_header_footer/docx_from_school_template/standard_exam_docx。界面：学情→学生画像第三标签「👨👩👧 家校沟通」、我的模板第三标签「📄 导出模板」、设置页「🗑️ 回收站」、作业行「📜 版本」。固定 key：`family_*`、`hw_version_*`、`export_tpl_*`、`recycle_*`。
 - v3.3.1 起修 UI/UX 关键问题。数据库仍 **34 张**，无表结构变化。AI 助手已合并到独立页 `modules/ai_assistant.py`：主区块走 `agent_service`（上下文/多Agent/复杂任务先出计划再确认/澄清/历史/修正），折叠区保留 `agent_core` 工具步骤与执行日志；侧边栏只有 `nav_ai_assistant` 一个入口，旧侧边栏助手 key 全部作废。`lesson_plan_tab`/`homework_tab`/`analysis_tab` 改为普通 session key，由 `lesson_sub_*`/`hw_sub_*`/`analysis_sub_*` 按钮组写入。教案生成与单元系列教案走 `task_service`（`"教案生成"`/`"单元系列教案"`），`_generate_lesson_core(params)` 为无 Streamlit 依赖的纯核心。注意事项：新增会读写数据库的顶层模块时，必须同步加进 `tests/test_app_smoke._isolated_app_code` 的模块导入列表和 SessionLocal 重绑定循环。

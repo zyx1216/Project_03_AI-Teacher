@@ -159,7 +159,8 @@ def _new_homework_dialog():
     book_labels = ["不关联资料"] + [b.name for b in books]
     dialog_material = st.selectbox(
         "关联资料（可选）", book_options,
-        format_func=lambda x: book_labels[book_options.index(x)],
+        format_func=lambda x: (book_labels[book_options.index(x)]
+                                if x in book_options else x),
         key="hw_new_material",
         help="选了资料后可选择章节，自动填充作业名")
 
@@ -987,16 +988,12 @@ def _question_list_editor(session, hw):
                 hw_svc.set_question_score(session, hw.id, q.id, score or None)
                 session.commit()
 
-    with st.expander("👁️ 预览学生卷 / 教师卷"):
-        pc1, pc2 = st.columns(2)
-        if pc1.button("导出学生卷 Word", key=f"dl_stu_{hw.id}"):
-            data = hw_svc.export_word(session, hw.id, with_answer=False)
-            st.download_button("⬇️ 下载学生卷", data, file_name=f"{hw.name}-学生卷.docx",
-                               mime=DOCX_MIME, key=f"dl_stu_b_{hw.id}")
-        if pc2.button("导出教师卷 Word", key=f"dl_tea_{hw.id}"):
-            data = hw_svc.export_word(session, hw.id, with_answer=True)
-            st.download_button("⬇️ 下载教师卷", data, file_name=f"{hw.name}-教师卷.docx",
-                               mime=DOCX_MIME, key=f"dl_tea_b_{hw.id}")
+    # v3.5.0：统一为一个导出入口，弹窗里选"卷别 × 格式（Word/PDF）"。
+    _export_label = ("📄 导出试卷" if hw.homework_type == "exam"
+                     else "📄 导出作业")
+    if st.button(_export_label, key=f"exam_export_btn_{hw.id}"):
+        # 直接打开弹窗：点 x/空白关闭后不会残留状态（同 v3.4.1 上下文弹窗口径）。
+        _exam_export_dialog(hw.id)
 
     cc1, cc2 = st.columns(2)
     if cc1.button("📦 存为模板", key=f"tpl_{hw.id}"):
@@ -1405,12 +1402,8 @@ def _generated_exams_panel(subject: str):
                     session.commit()
                 goto_group("📝 学业测评", "作业管理", hw_open_id=exam.id)
             if c5.button("导出", key=f"export_exam_{exam.id}"):
-                with SessionLocal() as session:
-                    data = hw_svc.export_word(session, exam.id, with_answer=False)
-                st.download_button(
-                    "⬇️ 下载试卷", data,
-                    file_name=f"{exam.name}.docx", mime=DOCX_MIME,
-                    key=f"download_exam_{exam.id}")
+                # v3.5.0：统一走导出弹窗（学生卷/教师卷 × Word/PDF）。
+                _exam_export_dialog(exam.id)
             if c6.button("删除", key=f"del_exam_{exam.id}"):
                 st.session_state["confirm_del_exam"] = exam.id
 
@@ -3846,3 +3839,53 @@ def _homework_versions_dialog(homework_id: int) -> None:
         st.session_state.pop("hw_versions_dialog_id", None)
         st.session_state.pop("hw_version_diff", None)
         st.rerun()
+
+
+@st.dialog("导出试卷")
+def _exam_export_dialog(homework_id: int) -> None:
+    """导出试卷/作业（v3.5.0）：选卷别与格式，生成后给下载按钮。"""
+    from utils import export_service, user_config
+
+    with SessionLocal() as session:
+        hw = session.get(Homework, homework_id)
+        if hw is None:
+            st.error("该作业/试卷不存在。")
+            return
+        is_exam = hw.homework_type == "exam"
+        hw_name = hw.name
+    st.caption(f"{hw_name}　"
+               + ("（试卷：含密封线/注意事项/逐题分值/得分栏）" if is_exam
+                  else "（普通作业：题目列表）"))
+    paper = st.radio("卷别", ["学生卷", "教师卷"],
+                     key=f"exam_export_paper_{homework_id}")
+    formats = ["Word", "PDF"] if is_exam else ["Word"]
+    fmt = st.radio("格式", formats, horizontal=True,
+                   key=f"exam_export_format_{homework_id}")
+    if st.button("生成文件", type="primary",
+                 key=f"exam_export_run_{homework_id}",
+                 use_container_width=True):
+        with_answer = paper == "教师卷"
+        with SessionLocal() as session:
+            pairs = hw_svc.homework_questions(session, homework_id)
+            hw = session.get(Homework, homework_id)
+            if is_exam and fmt == "PDF":
+                data = export_service.exam_pdf(
+                    hw, pairs, school=user_config.school_name(),
+                    with_answer=with_answer)
+                suffix, mime = "pdf", "application/pdf"
+            else:
+                data = hw_svc.export_word(session, homework_id,
+                                          with_answer=with_answer)
+                suffix = "docx"
+                mime = DOCX_MIME
+        st.session_state[f"exam_export_bytes_{homework_id}"] = data
+        st.session_state[f"exam_export_suffix_{homework_id}"] = suffix
+        st.session_state[f"exam_export_mime_{homework_id}"] = mime
+    data = st.session_state.get(f"exam_export_bytes_{homework_id}")
+    if data:
+        suffix = st.session_state.get(f"exam_export_suffix_{homework_id}")
+        mime = st.session_state.get(f"exam_export_mime_{homework_id}")
+        st.download_button(
+            f"⬇️ 下载{suffix.upper()}", data,
+            file_name=f"{hw_name}-{paper}.{suffix}", mime=mime,
+            key=f"exam_export_dl_{homework_id}")

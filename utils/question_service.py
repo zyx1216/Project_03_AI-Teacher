@@ -542,31 +542,196 @@ def _append_specification_table(doc, specification_table: dict) -> None:
         set_cell(row[index], value, bold=True)
 
 
+# ---------------------------------------------------------------------------
+# v3.5.0：标准试卷外壳（学校名 / 密封线 / 注意事项 / 逐题分值 / 得分栏）
+# ---------------------------------------------------------------------------
+
+EXAM_FONT_TITLE = "黑体"      # 标题类（学校名、试卷标题）
+EXAM_FONT_BODY = "宋体"       # 正文与注意事项
+EXAM_SIZE_SCHOOL = 22.0       # 二号
+EXAM_SIZE_TITLE = 26.0        # 一号
+EXAM_SIZE_BODY = 12.0         # 小四
+EXAM_SIZE_NOTICE = 9.0
+EXAM_SEAL_TEXT = "密封线内不要答题"
+SCHOOL_NAME_PLACEHOLDER = "＿＿＿＿＿＿＿＿"
+
+
+def _set_run_font(run, name: str, size_pt: float, bold: bool = False) -> None:
+    """显式设置中英文字体（含 eastAsia），避免 Word 回退到默认字体。"""
+    from docx.oxml.ns import qn
+    from docx.shared import Pt
+
+    run.font.name = name
+    run.font.size = Pt(size_pt)
+    run.font.bold = bold
+    rpr = run._element.get_or_add_rPr()
+    rfonts = rpr.find(qn("w:rFonts"))
+    if rfonts is None:
+        rfonts = rpr.makeelement(qn("w:rFonts"), {})
+        rpr.append(rfonts)
+    for attr in ("w:ascii", "w:hAnsi", "w:eastAsia"):
+        rfonts.set(qn(attr), name)
+
+
+def _stacked_text(text: str) -> str:
+    """逐字换行，模拟竖排（Word 与 PyMuPDF Story 都能渲染，不依赖竖排属性）。"""
+    return "\n".join(list(str(text or "")))
+
+
+def _set_cell_dashed_right_border(cell) -> None:
+    """给单元格右侧加虚线边框（模拟密封线）。"""
+    from docx.oxml.ns import qn
+
+    tc_pr = cell._tc.get_or_add_tcPr()
+    borders = tc_pr.find(qn("w:tcBorders"))
+    if borders is None:
+        borders = tc_pr.makeelement(qn("w:tcBorders"), {})
+        tc_pr.append(borders)
+    right = borders.find(qn("w:right"))
+    if right is None:
+        right = borders.makeelement(qn("w:right"), {})
+        borders.append(right)
+    right.set(qn("w:val"), "dashed")
+    right.set(qn("w:sz"), "8")
+    right.set(qn("w:color"), "808080")
+
+
+def exam_notice_lines(exam_meta: dict) -> list[str]:
+    """标准试卷的三条注意事项（页数留空由老师填，Word 自动页数不可靠）。"""
+    meta = exam_meta or {}
+    total = meta.get("total_score")
+    duration = meta.get("duration")
+    first = f"1. 本试卷共 {meta.get('page_hint') or '____'} 页"
+    if total:
+        first += f"，满分 {float(total):g} 分"
+    if duration:
+        first += f"，考试时间 {int(duration)} 分钟"
+    first += "。"
+    return [first,
+            "2. 答题前请将姓名、学号填写在密封线内。",
+            "3. 请将答案写在答题区域内，写在密封线内无效。"]
+
+
+def _append_score_table(doc, count: int, per_row: int = 10) -> None:
+    """学生卷得分栏：题号 / 得分两行一组，每 10 题一张小表。"""
+    if count <= 0:
+        return
+    for begin in range(1, count + 1, per_row):
+        numbers = list(range(begin, min(begin + per_row, count + 1)))
+        table = doc.add_table(rows=2, cols=len(numbers) + 1)
+        try:
+            table.style = "Table Grid"
+        except KeyError:  # noqa: BLE001 —— 模板没有该样式时退化为无边框
+            pass
+        table.cell(0, 0).text = "题号"
+        table.cell(1, 0).text = "得分"
+        for offset, number in enumerate(numbers, start=1):
+            table.cell(0, offset).text = str(number)
+        for row in table.rows:
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    for run in paragraph.runs:
+                        _set_run_font(run, EXAM_FONT_BODY, EXAM_SIZE_NOTICE)
+    doc.add_paragraph("")
+
+
+def _build_exam_header(doc, title: str, exam_meta: dict,
+                       with_seal: bool, question_count: int = 0) -> None:
+    """标准试卷头部：学校名 + 标题 +（学生卷）密封线区块 + 注意事项。"""
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.shared import Cm
+
+    meta = exam_meta or {}
+    school_par = doc.add_paragraph()
+    school_par.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _set_run_font(school_par.add_run(
+        str(meta.get("school") or SCHOOL_NAME_PLACEHOLDER)),
+        EXAM_FONT_TITLE, EXAM_SIZE_SCHOOL, bold=True)
+
+    title_par = doc.add_paragraph()
+    title_par.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _set_run_font(title_par.add_run(str(title or "试卷")),
+                  EXAM_FONT_TITLE, EXAM_SIZE_TITLE, bold=True)
+
+    if with_seal:
+        # 左列 2cm 逐字竖排"密封线内不要答题"+ 右侧虚线；右列考生信息与注意事项
+        table = doc.add_table(rows=1, cols=2)
+        table.autofit = False
+        seal_cell, info_cell = table.rows[0].cells
+        seal_cell.width = Cm(2)
+        info_cell.width = Cm(15)
+        seal_par = seal_cell.paragraphs[0]
+        seal_par.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        _set_run_font(seal_par.add_run(_stacked_text(EXAM_SEAL_TEXT)),
+                      EXAM_FONT_BODY, EXAM_SIZE_NOTICE)
+        _set_dashed = _set_cell_dashed_right_border(seal_cell)
+        info_par = info_cell.paragraphs[0]
+        _set_run_font(info_par.add_run(
+            "班级：__________　姓名：__________　学号：__________　"
+            "分数：__________"), EXAM_FONT_BODY, EXAM_SIZE_BODY)
+        _notice_cell = info_cell
+    else:
+        _notice_cell = doc.add_paragraph()
+
+    # "注意事项："标题 + 三条内容
+    if with_seal:
+        label_par = _notice_cell.add_paragraph()
+    else:
+        label_par = doc.add_paragraph()
+    _set_run_font(label_par.add_run("注意事项："), EXAM_FONT_BODY,
+                  EXAM_SIZE_NOTICE, bold=True)
+    for index, line in enumerate(exam_notice_lines(meta)):
+        if with_seal:
+            paragraph = _notice_cell.add_paragraph()
+        else:
+            paragraph = _notice_cell if index == 0 else doc.add_paragraph()
+        _set_run_font(paragraph.add_run(line), EXAM_FONT_BODY,
+                      EXAM_SIZE_NOTICE)
+    if with_seal and question_count:
+        _append_score_table(doc, int(question_count))
+    doc.add_paragraph("")
+
+
 def export_questions_word(questions: list[Question], with_answer: bool,
                           title: str | None = None,
-                          specification_table: dict | None = None) -> bytes:
+                          specification_table: dict | None = None,
+                          exam_meta: dict | None = None,
+                          question_scores: dict | None = None) -> bytes:
     """
     导出题目到 Word。with_answer=False 学生卷（仅题目），True 教师卷（含答案解析）。
     题号按传入列表从 1 连续编号。
+
+    v3.5.0：传 exam_meta 时按**标准试卷**格式输出（学校名/密封线/注意事项/
+    逐题分值/得分栏）；不传时保持"习题卷"原样（普通作业与题库导出）。
     """
     import io
     from docx import Document
 
     if title is None:
-        title = "习题"
+        title = "试卷" if exam_meta else "习题"
 
     doc = Document()
-    doc.add_heading(title, level=0)
-    if not with_answer:
-        doc.add_paragraph(
-            "班级：____________    姓名：____________    得分：____________")
+    if exam_meta:
+        # 学生卷带密封线与考生信息栏；教师卷只带学校名/标题/注意事项。
+        _build_exam_header(doc, title, exam_meta, with_seal=not with_answer,
+                           question_count=len(questions))
+    else:
+        doc.add_heading(title, level=0)
+        if not with_answer:
+            doc.add_paragraph(
+                "班级：____________    姓名：____________    得分：____________")
     for idx, q in enumerate(questions, start=1):
         type_label = QUESTION_TYPES.get(q.question_type, "解答题")
         diff_label = DIFFICULTY_LABELS.get(q.difficulty, "")
         kps = knowledge_points_list(q)
         parts = _split_choice_options(q.content)
+        # v3.5.0：标准试卷在题号后标出每题分值（仅试卷模式）。
+        _score = (question_scores or {}).get(getattr(q, "id", None))
+        score_txt = f"{float(_score):g}分" if _score else ""
         if with_answer:
-            head = f"{idx}.（{type_label}，{diff_label}）"
+            head = (f"{idx}.（{score_txt}，{type_label}，{diff_label}）"
+                    if score_txt
+                    else f"{idx}.（{type_label}，{diff_label}）")
             if kps:
                 head += f"【{'、'.join(kps)}】"
             doc.add_paragraph(head)
@@ -585,7 +750,10 @@ def export_questions_word(questions: list[Question], with_answer: bool,
                 _render_latex_paragraph(doc, q.error_points)
         else:
             # 学生卷：题号直接并入题干，不输出题型、难度、知识点。
-            _render_latex_paragraph(doc, f"{idx}.　{parts[0] if parts else ''}")
+            _prefix = (f"{idx}.（{score_txt}）　" if score_txt
+                       else f"{idx}.　")
+            _render_latex_paragraph(
+                doc, f"{_prefix}{parts[0] if parts else ''}")
             for part in parts[1:]:
                 _render_latex_paragraph(doc, part)
         doc.add_paragraph("")

@@ -335,14 +335,27 @@ def test_docx_and_exam_exports(session, tmp_path):
         es.docx_from_school_template(path, {"不存在": 1})
 
     hw, question, link = _seed_exam_homework(session)
-    exam_doc = es.standard_exam_docx(hw, [(link, question)],
-                                     school="测试小学", with_answer=True,
-                                     header="单元测试卷")
-    parsed = Document(io.BytesIO(exam_doc))
+    teacher_doc = es.standard_exam_docx(hw, [(link, question)],
+                                        school="测试小学", with_answer=True,
+                                        header="单元测试卷")
+    parsed = Document(io.BytesIO(teacher_doc))
     body = "\n".join(p.text for p in parsed.paragraphs)
-    assert "单元测试卷" in body
-    assert "1+1=?" in body and "答案：2" in body
-    assert len(parsed.tables) >= 1  # 密封线表格
+    tables = "\n".join(c.text for t in parsed.tables for r in t.rows
+                        for c in r.cells)
+    # v3.5.0：路径B 已统一到"标准试卷外壳"；教师卷含学校名/注意事项/答案
+    assert "测试小学" in body
+    assert "注意事项" in body + tables
+    assert "1+1=?" in body and "【答案】" in body
+    # 学生卷才有密封线与得分栏
+    student_doc = es.standard_exam_docx(hw, [(link, question)],
+                                        school="测试小学", with_answer=False)
+    parsed2 = Document(io.BytesIO(student_doc))
+    student_text = ("".join(p.text for p in parsed2.paragraphs)
+                    + "".join(c.text for t in parsed2.tables
+                              for r in t.rows for c in r.cells))
+    assert "密封线内不要答题" in student_text.replace("\n", "")
+    assert "得分" in student_text
+    assert len(parsed2.tables) >= 2  # 密封线区块 + 得分栏
 
 
 # ---------------------------------------------------------------------------

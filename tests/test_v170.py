@@ -66,9 +66,19 @@ def _editor_state(rows):
     }
 
 
+def _select_material_grade(at):
+    """v3.5.0：出题页默认年级来自 user_config，测试里显式切成三年级，
+    与种子资料（三年级数学书）一致——否则资料被学科+年级过滤掉，选中值会失效。
+    """
+    grade_box = _widget(at, "selectbox", "question_gen_grade")
+    if grade_box.value != "三年级":
+        grade_box.set_value("三年级").run()
+
+
 def _prepare_current_config(at, rows, chapter, kps, extra="结合生活"):
     import pandas
 
+    _select_material_grade(at)
     material = _widget(at, "selectbox", "question_gen_material")
     if material.value != 1:
         material.set_value(1).run()
@@ -121,6 +131,7 @@ def test_chapter_single_select_options_and_no_old_multiselect(tmp_path):
     at.run()
     _goto_question_tab(at)
 
+    _select_material_grade(at)
     _widget(at, "selectbox", "question_gen_material").set_value(1).run()
 
     chapter = _widget(at, "selectbox", "question_gen_chapter")

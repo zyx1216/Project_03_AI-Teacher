@@ -151,8 +151,17 @@ def _render_reflection_generation():
         class_choice = c3.selectbox("班级", class_options, key="reflection_class")
         generate = st.form_submit_button("🤖 生成教学反思", type="primary")
 
-    start_id = exams[exam_labels.index(start_label)].id
-    end_id = exams[exam_labels.index(end_label)].id if end_label else None
+    # v3.5.0：考试列表变化后旧选中项可能失效，用 in 判定避免 index() 崩溃。
+    if start_label in exam_labels:
+        start_id = exams[exam_labels.index(start_label)].id
+    elif exams:
+        start_id = exams[0].id
+    else:
+        start_id = None
+    if end_label and end_label in exam_labels:
+        end_id = exams[exam_labels.index(end_label)].id
+    else:
+        end_id = None
     class_name = None if class_choice == "全部班级" else class_choice
     scope_key = "range" if scope_type.startswith("一段") else "exam"
 

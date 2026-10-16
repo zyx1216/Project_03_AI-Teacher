@@ -499,16 +499,28 @@ def export_word(session, homework_id: int, with_answer: bool,
     if append_specification is None:
         append_specification = hw.homework_type == "exam"
 
+    # v3.5.0：试卷需要逐题分值（细目表开关不影响分值标注）。
+    question_scores = _export_question_scores(pairs, hw.total_score or 0)
     specification_table = None
     if append_specification:
         from utils import smart_compose_service
-        scores = _export_question_scores(pairs, hw.total_score or 0)
         specification_table = smart_compose_service.build_specification_table(
-            questions, scores)
+            questions, question_scores)
+
+    # v3.5.0：正式试卷套用标准外壳（学校名/密封线/注意事项/得分栏）。
+    exam_meta = None
+    if hw.homework_type == "exam":
+        from utils import user_config
+        exam_meta = {
+            "school": user_config.school_name(),
+            "total_score": hw.total_score,
+            "duration": hw.duration,
+        }
 
     return qs.export_questions_word(
         questions, with_answer=with_answer, title=title,
-        specification_table=specification_table)
+        specification_table=specification_table,
+        exam_meta=exam_meta, question_scores=question_scores)
 
 
 def _export_question_scores(pairs: list, total_score: float) -> dict[int, float]:

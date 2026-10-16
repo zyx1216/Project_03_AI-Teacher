@@ -56,6 +56,20 @@ TEXT_DIR = Path(config.UPLOAD_DIR) / "text"
 TYPE_LABELS = {"choice": "选择题", "fill": "填空题", "judge": "判断题", "solution": "解答题"}
 DIFF_LABELS = {1: "基础", 2: "中等", 3: "拓展"}
 STATUS_LABELS = {"pending": "待审核", "approved": "已审核"}
+def _label_for(options, labels, value) -> str:
+    """取下拉项的显示名；v3.5.0：选中值失效（不在 options 里）时给占位文案。
+
+    原来的 labels[options.index(x)] 在资料被删/切换学科年级后会抛
+    ValueError: x is not in list，导致整页崩溃。
+    """
+    try:
+        return labels[options.index(value)]
+    except (ValueError, IndexError):
+        # 未命中时原样返回：既不抛异常，也不会让 AppTest 的
+        # "格式化标签回退"失效（返回占位文案会让测试直接报 ValueError）。
+        return value
+
+
 SOURCE_LABELS = {"ai_generated": "🤖 AI生成", "imported": "外部导入",
                 "manual": "✍️ 手动录入", "material": "📚 资料提取",
                 "grading": "📝 批改入库"}
@@ -1352,8 +1366,13 @@ def _lesson_material_picker(subject, grade):
         books = query.order_by(Textbook.id.desc()).all()
         options = [None] + [book.id for book in books]
         labels = ["不使用资料"] + [book.name for book in books]
+        # v3.5.0：上次选中的资料可能已被删除/被学科年级筛掉，先重置再建控件。
+        _picked = st.session_state.get("lesson_material_select")
+        if _picked is not None and _picked not in options:
+            st.session_state["lesson_material_select"] = None
         material_id = st.selectbox(
-            "选择资料", options, format_func=lambda x: labels[options.index(x)],
+            "选择资料", options,
+            format_func=lambda x: _label_for(options, labels, x),
             key="lesson_material_select",
             on_change=_on_lesson_material_change)
 
@@ -2358,7 +2377,7 @@ def _question_gen_material(subject, grade):
     current = st.session_state.get("question_gen_material")
     index = options.index(current) if current in options else 0
     return st.selectbox("资料（可选）", options, index=index,
-                        format_func=lambda x: labels[options.index(x)],
+                        format_func=lambda x: _label_for(options, labels, x),
                         key="question_gen_material",
                         on_change=_on_question_material_change)
 
@@ -3523,10 +3542,14 @@ def _question_ocr_tasks(subject):
     index = options.index(current) if current in options else 0
     st.session_state["selected_question_ocr_task"] = st.selectbox(
         "扫描件 OCR 结果", options, index=index,
-        format_func=lambda x: labels[options.index(x)],
+        format_func=lambda x: _label_for(options, labels, x),
         key="question_ocr_result_select")
     selected = st.session_state["selected_question_ocr_task"]
-    selected_task = ocr_tasks.load_tasks()[selected]
+    # v3.5.0：任务可能在别处被清掉，取不到就提示而不是 KeyError 崩页。
+    selected_task = ocr_tasks.load_tasks().get(selected)
+    if selected_task is None:
+        st.info("该 OCR 任务已不存在，请重新上传扫描件。")
+        return
     if selected_task["status"] == ocr_tasks.STATUS_FAILED:
         st.error(selected_task.get("error") or "OCR识别失败。")
     elif selected_task["status"] == ocr_tasks.STATUS_STOPPED:
@@ -4112,7 +4135,9 @@ def tab_unit_design():
     if candidates:
         labels = [f"{c['chapter']}（{c['textbook_name']}）" for c in candidates]
         picked = st.selectbox("选择资料单元", labels, key="unit_candidate")
-        candidate = candidates[labels.index(picked)]
+        # v3.5.0：切换学科/年级后旧选中项可能已不在候选里，回退到首项。
+        candidate = (candidates[labels.index(picked)]
+                     if picked in labels else candidates[0])
     else:
         st.info("资料中没有可用章节目录，可手动填写单元。")
         candidate = {"textbook_id": None, "chapter": ""}

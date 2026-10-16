@@ -293,6 +293,7 @@ def _isolated_app_code(db_file: Path, feature_file: Path | None = None,
                        class_records_file: Path | None = None,
                        onboarding_file: Path | None = None,
                        shortcut_config_file: Path | None = None,
+                       user_config_file: Path | None = None,
                        log_dir: Path | None = None,
                        ocr_trigger_file: Path | None = None,
                        text_dir: Path | None = None,
@@ -327,6 +328,8 @@ def _isolated_app_code(db_file: Path, feature_file: Path | None = None,
     class_records_file = class_records_file or db_file.parent / "class_records.json"
     onboarding_file = onboarding_file or db_file.parent / "onboarding.json"
     shortcut_config_file = shortcut_config_file or db_file.parent / "shortcut_config.json"
+    # v3.5.0：user_config 也要隔离，否则默认年级会被开发机上的真实配置影响。
+    user_config_file = user_config_file or db_file.parent / "user_config.json"
     log_dir = log_dir or db_file.parent / "logs"
     ocr_trigger_file = ocr_trigger_file or db_file.parent / "never_trigger"
     template = r"""
@@ -359,6 +362,7 @@ import utils.api_key_service as api_key_service
 import utils.class_recording_service as class_recording_service
 import utils.onboarding_service as onboarding_service
 import utils.keyboard_shortcuts as keyboard_shortcuts
+import utils.user_config as user_config
 import utils.error_logger as error_logger
 import modules.ai_assistant, modules.analysis, modules.calendar, modules.dashboard, modules.databoard, modules.homework, modules.lesson_plan, modules.parent_communication, modules.reflection, modules.settings, modules.submit_page
 import os as _os
@@ -393,6 +397,7 @@ api_key_service.API_KEYS_PATH = _Path(r"__APIKEYSFILE__")
 class_recording_service.RECORDING_PATH = _Path(r"__CLASSRECORDSFILE__")
 onboarding_service.ONBOARDING_PATH = _Path(r"__ONBOARDINGFILE__")
 keyboard_shortcuts.SHORTCUT_CONFIG_PATH = _Path(r"__SHORTCUTCONFIGFILE__")
+user_config.USER_CONFIG_FILE = _Path(r"__USERCONFIGFILE__")
 error_logger.ERROR_LOG_DIR = _Path(r"__LOGDIR__")
 
 class _FakeOCREngine:
@@ -458,6 +463,7 @@ runpy.run_path(r"__APPFILE__", run_name="__main__")
             .replace("__CLASSRECORDSFILE__", class_records_file.as_posix())
             .replace("__ONBOARDINGFILE__", onboarding_file.as_posix())
             .replace("__SHORTCUTCONFIGFILE__", shortcut_config_file.as_posix())
+            .replace("__USERCONFIGFILE__", user_config_file.as_posix())
             .replace("__LOGDIR__", log_dir.as_posix())
             .replace("__TEXTDIR__", text_dir.as_posix() if text_dir else "")
             .replace("__OCRTRIGGER__", ocr_trigger_file.as_posix())
