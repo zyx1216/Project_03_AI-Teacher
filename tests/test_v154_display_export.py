@@ -48,15 +48,17 @@ def test_build_score_report_xlsx_all_classes(session):
 
     assert ws["A1"].value == "全年级 第一次月考 成绩单"
     assert ws.merged_cells.ranges
-    assert [ws.cell(2, col).value for col in range(1, 7)] == [
-        "姓名", "学号", "班级", "数学", "总分", "班级排名"]
+    # v3.5.2：科目表头带满分，末尾补"总得分率 / 年级排名"
+    assert [ws.cell(2, col).value for col in range(1, 9)] == [
+        "姓名", "学号", "班级", "数学(满分100)", "总分", "总得分率",
+        "班级排名", "年级排名"]
 
     student_rows = [
-        [ws.cell(3, col).value for col in range(1, 7)],
-        [ws.cell(4, col).value for col in range(1, 7)],
+        [ws.cell(3, col).value for col in range(1, 9)],
+        [ws.cell(4, col).value for col in range(1, 9)],
     ]
-    assert ["学生甲", None, "一班", 90, 90, 1] in student_rows
-    assert ["学生乙", None, "二班", 80, 80, 1] in student_rows
+    assert ["学生甲", None, "一班", 90, 90, 0.9, 1, 1] in student_rows
+    assert ["学生乙", None, "二班", 80, 80, 0.8, 1, 2] in student_rows
 
     assert ws.cell(5, 4).value == 85
     assert ws.cell(6, 4).value == 90

@@ -962,9 +962,33 @@ def _score_import_panel():
                 lambda _row: ["background-color:#fff3cd"] * len(_row), axis=1),
             width="stretch", hide_index=True)
         st.caption("请在下方表格里改成正确分数，再点「✅ 确认导入成绩」。")
+    # v3.5.2：缺考 / 未录分分开提示（橙=缺考，灰=漏录）
+    import html as _html
+    _absent_items, _missing_items = [], []
+    for _rec in records:
+        _who = _html.escape(str(_rec.get("name") or "（缺姓名）"))
+        if _rec.get("class_name"):
+            _who += f"（{_html.escape(str(_rec['class_name']))}）"
+        _absent_items.extend(
+            f"{_who} - {_html.escape(str(_s))} - 缺考"
+            for _s in (_rec.get("absent_subjects") or []))
+        _missing_items.extend(
+            f"{_who} - {_html.escape(str(_s))} - 未录分"
+            for _s in (_rec.get("missing_subjects") or []))
+    if _absent_items or _missing_items:
+        _lines = []
+        if _absent_items:
+            _lines.append("<span style='color:#e67e22;font-weight:600'>"
+                          "缺考（不计分）：</span>" + "、".join(_absent_items))
+        if _missing_items:
+            _lines.append("<span style='color:#888'>"
+                          "未录分（请补录）：</span>" + "、".join(_missing_items))
+        st.markdown("　".join(_lines), unsafe_allow_html=True)
+        st.caption("缺考按不计分处理；未录分请在下方表格里补齐后再导入。")
     problem_count = int((preview["问题"] != "").sum())
     if problem_count:
-        st.warning(f"有 {problem_count} 行提示问题（缺姓名会跳过；缺考科目不计分），请核对。")
+        st.warning(f"有 {problem_count} 行提示问题（缺姓名会跳过；缺考科目不计分；"
+                   "未录分请补录），请核对。")
 
     edited = st.data_editor(
         preview, num_rows="dynamic", width="stretch", hide_index=True,

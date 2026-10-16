@@ -647,6 +647,16 @@ def student_score_history_rows(session, class_name: str | None = None,
 # 格式化成绩单 Excel
 # ---------------------------------------------------------------------------
 
+def _grade_rank_map(session, exam_id: int) -> dict:
+    """该场考试全体学生按总分现算的年级排名（并列同名次），不落库。
+
+    v3.5.2：导出单个班级时，年级排名仍按全年级口径给。
+    """
+    rows = exam_score_rows(session, exam_id)
+    ranks = stats_mod.competition_rank([r.get("total") for r in rows])
+    return {r["student_id"]: rank for r, rank in zip(rows, ranks)}
+
+
 def build_score_report_xlsx(session, exam_id: int,
                             class_name: str | None = None) -> bytes:
     """生成某场考试的格式化成绩单，返回 xlsx 字节。"""
@@ -661,11 +671,25 @@ def build_score_report_xlsx(session, exam_id: int,
 
     exam = analysis["exam"]
     subjects = list(analysis["subjects"])
+    full_scores = analysis.get("full_scores") or {}
+    total_full = float(analysis.get("total_full") or 0)
     rows = [r for r in analysis["rows"] if r.get("total") is not None]
     if not rows:
         raise ValueError("这场考试还没有有效总分，无法导出成绩单。")
+    grade_ranks = _grade_rank_map(session, exam_id)
 
-    headers = ["姓名", "学号", "班级"] + subjects + ["总分", "班级排名"]
+    # v3.5.2：显示表头和数据键分开，表头可以带"(满分N)"说明，取值仍按科目名。
+    columns = [("姓名", "name", "text"), ("学号", "student_no", "text"),
+               ("班级", "class_name", "text")]
+    for subject in subjects:
+        full = full_scores.get(subject)
+        label = f"{subject}(满分{float(full):g})" if full else str(subject)
+        columns.append((label, subject, "score"))
+    columns.append(("总分", "total", "score"))
+    columns.append(("总得分率", None, "rate"))
+    columns.append(("班级排名", "total_rank", "rank"))
+    columns.append(("年级排名", None, "grade_rank"))
+    headers = [column[0] for column in columns]
     wb = Workbook()
     ws = wb.active
     ws.title = "成绩单"
@@ -691,42 +715,61 @@ def build_score_report_xlsx(session, exam_id: int,
         cell.border = border
         cell.alignment = center
 
-    numeric_cols = set(subjects + ["总分"])
     for row_no, row in enumerate(rows, start=3):
-        values = [
-            row["name"], row.get("student_no") or "",
-            row.get("class_name") or "",
-            *[row.get(s) for s in subjects],
-            row.get("total"), row.get("total_rank"),
-        ]
-        for col, value in enumerate(values, start=1):
+        for col, (_label, key, kind) in enumerate(columns, start=1):
+            if kind == "rate":
+                total = row.get("total")
+                value = (round(total / total_full, 4)
+                         if total_full and total is not None else None)
+            elif kind == "grade_rank":
+                value = grade_ranks.get(row.get("student_id"))
+            else:
+                value = row.get(key)
+                if kind == "text" and key in ("student_no", "class_name"):
+                    value = value or ""
             cell = ws.cell(row_no, col, value)
             cell.border = border
             cell.alignment = center
             cell.font = Font(name="微软雅黑")
-            if headers[col - 1] in numeric_cols:
+            if kind == "score":
                 cell.number_format = "0.0"
+            elif kind == "rate":
+                cell.number_format = "0.0%"
 
     summary_start = len(rows) + 3
     for offset, label in enumerate(("平均分", "最高分", "最低分")):
         row_no = summary_start + offset
         ws.cell(row_no, 1, label)
-        for col, header in enumerate(headers, start=1):
+        for col, (_label, key, kind) in enumerate(columns, start=1):
             cell = ws.cell(row_no, col)
             cell.border = border
             cell.alignment = center
             cell.font = Font(name="微软雅黑", bold=col == 1)
-            if header in numeric_cols:
-                vals = [r[header] for r in rows if r.get(header) is not None]
-                if vals:
-                    value = (round(sum(vals) / len(vals), 1) if label == "平均分"
-                             else max(vals) if label == "最高分" else min(vals))
-                    cell.value = value
-                    cell.number_format = "0.0"
+            if kind == "text":
+                continue
+            if kind == "rate":
+                vals = [r["total"] / total_full for r in rows
+                        if total_full and r.get("total") is not None]
+            elif kind == "grade_rank":
+                vals = [grade_ranks.get(r.get("student_id")) for r in rows
+                        if grade_ranks.get(r.get("student_id")) is not None]
+            else:
+                vals = [r.get(key) for r in rows if r.get(key) is not None]
+            if not vals:
+                continue
+            if label == "平均分":
+                value = (round(sum(vals) / len(vals), 4) if kind == "rate"
+                         else round(sum(vals) / len(vals), 1))
+            else:
+                value = max(vals) if label == "最高分" else min(vals)
+            cell.value = value
+            cell.number_format = "0.0%" if kind == "rate" else "0.0"
 
-    widths = {"姓名": 12, "学号": 12, "班级": 14, "总分": 10, "班级排名": 10}
-    for col, header in enumerate(headers, start=1):
-        ws.column_dimensions[get_column_letter(col)].width = widths.get(header, 10)
+    widths = {"姓名": 12, "学号": 12, "班级": 14, "总分": 10, "总得分率": 12,
+              "班级排名": 12, "年级排名": 12}
+    for col, (label, _key, kind) in enumerate(columns, start=1):
+        width = widths.get(label, 14 if kind == "score" else 10)
+        ws.column_dimensions[get_column_letter(col)].width = width
     ws.freeze_panes = "A3"
 
     buffer = io.BytesIO()

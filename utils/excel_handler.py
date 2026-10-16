@@ -42,7 +42,9 @@ META_KEYWORDS = ["序号", "序號", "编号", "考号", "准考证", "名次", 
                  "合计", "平均分", "均分", "备注", "姓名", "班级", "学号", "性别"]
 
 # 科目列名里要剥掉的后缀
-SUBJECT_SUFFIXES = ["成绩", "分数", "得分", "成績", "分數", "学科", "科目", "成绩分"]
+# v3.5.2：末尾补"分/绩"单字后缀（长后缀仍优先），"英语分"也能识别成标准科目
+SUBJECT_SUFFIXES = ["成绩", "分数", "得分", "成績", "分數", "学科", "科目",
+                    "成绩分", "分", "绩"]
 
 # 标准科目别名（规范化后比较）；未命中则保留清洗后的原列名
 SUBJECT_ALIASES = {
@@ -345,6 +347,20 @@ def parse_long_table(df: pd.DataFrame) -> Optional[list[dict]]:
         return None
     return records
 
+# v3.5.2：缺考类字样（单元格有内容，和"空着没录"区分开）
+_ABSENT_MARKERS = ("缺考", "旷考", "未考", "缺", "免考", "请假")
+
+
+def _looks_absent(value) -> bool:
+    """单元格是不是缺考类字样（缺考/旷考/缺…）。"""
+    if value is None:
+        return False
+    text = str(value).strip().replace("分", "")
+    if not text:
+        return False
+    return any(marker in text for marker in _ABSENT_MARKERS)
+
+
 def _looks_negative(value) -> bool:
     """单元格看起来是负数（用于"分数为负"提示，_to_score 已把负分判为无效）。"""
     if value is None:
@@ -373,6 +389,7 @@ def extract_scores(df: pd.DataFrame, detected: dict,
         name = _to_text(row[name_col]) if name_col else None
         scores = {}
         missing_subjects = []
+        absent_subjects = []
         extra_notes = []
         for col, subject in subjects:
             raw = row[col]
@@ -384,7 +401,11 @@ def extract_scores(df: pd.DataFrame, detected: dict,
                 value = None
             elif value is None and _looks_negative(raw):
                 extra_notes.append(f"{subject} 分数为负，请确认")
+            elif value is None and _looks_absent(raw):
+                # v3.5.2：写了"缺考"等字样 —— 学生真的没考
+                absent_subjects.append(subject)
             elif value is None:
+                # v3.5.2：单元格空着 —— 老师还没录分
                 missing_subjects.append(subject)
             scores[subject] = value
         # 跳过彻底空白的行
@@ -393,9 +414,9 @@ def extract_scores(df: pd.DataFrame, detected: dict,
         problems = []
         if not name:
             problems.append("缺姓名")
-        if name and missing_subjects:
-            problems.append("缺分科目：" + "、".join(missing_subjects))
         if name:
+            problems.extend(f"{subject} - 缺考" for subject in absent_subjects)
+            problems.extend(f"{subject} - 未录分" for subject in missing_subjects)
             problems.extend(extra_notes)
         records.append({
             "row_no": row_no,
@@ -403,6 +424,8 @@ def extract_scores(df: pd.DataFrame, detected: dict,
             "class_name": _to_text(row[class_col]) if class_col else None,
             "scores": scores,
             "problems": problems,
+            "absent_subjects": absent_subjects,
+            "missing_subjects": missing_subjects,
         })
     return records
 
@@ -442,8 +465,14 @@ def scores_preview_frame(records: list[dict]) -> tuple[pd.DataFrame, list[str]]:
             "姓名": rec.get("name"),
             "班级": rec.get("class_name") or "",
         }
+        absent = set(rec.get("absent_subjects") or [])
         for s in subjects:
-            row[s] = rec["scores"].get(s)
+            value = rec["scores"].get(s)
+            # v3.5.2：缺考在预览里保留"缺考"文字，和"空着没录"区分；
+            # 入库时 _to_score("缺考") 仍按 None 处理（不计 0 分）。
+            if value is None and s in absent:
+                value = "缺考"
+            row[s] = value
         row["问题"] = "、".join(rec.get("problems", []))
         rows.append(row)
     return pd.DataFrame(rows, dtype=object), subjects
@@ -459,20 +488,24 @@ def preview_to_records(df: pd.DataFrame, subjects: list[str]) -> list[dict]:
         name = _to_text(row.get("姓名"))
         class_name = _to_text(row.get("班级"))
         scores = {}
+        absent = []
         missing = []
         for s in subjects:
-            value = _to_score(row.get(s))
+            raw = row.get(s)
+            value = _to_score(raw)
             scores[s] = value
             if name and value is None:
-                missing.append(s)
+                # v3.5.2：单元格写了"缺考"算缺考，空着算未录分
+                (absent if _looks_absent(raw) else missing).append(s)
         # 整行空白（无姓名且所有分数为空）直接丢弃
         if not name and all(v is None for v in scores.values()):
             continue
         problems = []
         if not name:
             problems.append("缺姓名")
-        if missing:
-            problems.append("缺分科目：" + "、".join(missing))
+        if name:
+            problems.extend(f"{s} - 缺考" for s in absent)
+            problems.extend(f"{s} - 未录分" for s in missing)
         records.append({
             "name": name,
             "class_name": class_name,

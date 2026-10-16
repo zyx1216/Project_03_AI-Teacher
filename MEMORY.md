@@ -2,6 +2,19 @@
 
 > 项目长期记忆：架构决策、设计取舍、踩过的坑、我的纠正、重要外部资源。
 > 规则：不记密钥/密码/Token（只记"密钥放在哪里"）；代码里一眼能看出来的东西不抄；最新记录置顶。
+## v3.5.2（低严重度问题修复）新增
+- 架构决策（2026-10-16）：
+  - **缺考 vs 未录分**：`extract_scores` 的每条记录多返回 `absent_subjects` / `missing_subjects` 两个键（problems 文案相应变成 `X - 缺考` / `X - 未录分`）。`scores_preview_frame` 会把缺考格写成字符串"缺考"（否则预览只剩 None、往返后分不清），`preview_to_records` 用 `_looks_absent` 再还原。**入库仍是 None，绝不补 0**。
+  - **教案模板只走本地 JSON**：`data/lesson_templates.json`，没有数据库表（指令文档写的"数据库 templates 表"是错的）。`BUILTIN_LESSON_TEMPLATES` = 通用/小学/初中/高中；`list_lesson_templates()` 每次都把内置合并进返回列表（内置正文以代码为准、自定义在后），这样老用户的旧 JSON 也能看到新模板；`save_custom_lesson_template` 落盘时同样补齐内置。
+  - **成绩单表头与数据键分离**：`build_score_report_xlsx` 用 `columns = [(显示表头, 数据键, 类型)]`，因为表头要带"（满分N）"而取值仍得按科目名（否则平均分/最高分行会取空）。得分率写数值比率 + `number_format="0.0%"`，不写文本（可排序求和）。年级排名用 `_grade_rank_map`（整场考试现算、不落库），单班导出仍给全年级口径。
+  - **选项排版单一实现**：`question_service.choice_option_lines`（`_split_choice_options` 的公开别名）被 Word 导出、`export_service._exam_html`（PDF）、`lesson_plan._format_question_content`（页面预览）三处共用；页面预览只在**单行**内容时才拆分（多行内容保持原逐行逻辑，避免把非 A-D 的多行内容压成一段）。
+- 踩坑（2026-10-16）：
+  - **仓库行尾是混的**：同一目录里大部分文件 CRLF，但 `utils/template_service.py`、`utils/parent_report_service.py`、`tests/test_score_doc_parser.py`、`tests/test_v154_display_export.py` 等索引里是 LF。用 `newline="
+"` 或统一 CRLF 重写会让整文件"假改动"。正确做法：**先 `git ls-files --eol <file>` 看 i/ 的值，写回时对齐索引行尾**（本次用 `git cat-file blob :<path>` 判断 CRLF/LF 再写）。
+  - **PowerShell 里写补丁脚本**：`Set-Content` 生成的 .py 本身是 CRLF，Python 读源码时会把换行规范化成 LF，所以补丁里的多行 `old` 字符串要显式把 `\n` 换成目标文件的行尾（CRLF 文件换成 `\r\n`）才匹配得上；更稳的写法是「读进来先统一成 LF，改完再按索引行尾写回」。
+  - **`detect_score_columns` 要求该列至少有一个能转成数字的值**：整列都是"缺考/空"时这一科根本不会被识别，写测试时至少留一行正常分数。
+- 验证（2026-10-16）：全量 **1230 passed / 0 failed**（全绿）。
+
 ## v3.5.1（中严重度问题修复）新增
 - 架构决策（2026-10-16）：
   - **章节条目结构**：`material_service.split_chapters` 每条 = `{title, raw_title, display_title, level, parent, is_review, content}`。level：第X章/单元/节=1、X.X=2、X.X.X=3；review 小节强制 level=2。**空条目一律丢弃**（含空的一级标题——它只作为子节 parent 出现在 display_title 里），目录行（`is_toc_line`：标题+点线+页码）跳过且不计入内容。`is_chapter_heading` 语义**不变**（仍只判标题）。

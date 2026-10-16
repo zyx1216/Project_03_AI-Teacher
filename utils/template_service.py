@@ -36,6 +36,60 @@ BUILTIN_LESSON_TEMPLATES = {
 5. 作业布置
 六、板书设计
 七、教学反思""",
+    "小学教案模板": """请按以下结构生成小学教案（1-6年级），语言贴近小学生，活动要具体可操作：
+一、教学目标
+1. 知识与技能
+2. 过程与方法
+3. 情感态度与价值观
+二、教学重点
+三、教学难点
+四、教学准备
+五、教学过程
+1. 导入新课（用情境、故事或小游戏导入）
+2. 课堂互动设计（写明提问、同桌互说、小组合作的形式与时间）
+3. 游戏活动（设计 1 个与本课相关的课堂小游戏，写清规则与目标）
+4. 讲授新知（分步骤推进，每步配一个具体例子）
+5. 课堂练习（基础题 + 提升题，分层完成）
+6. 课堂小结（让学生用自己的话说收获）
+7. 作业布置（少而精，尽量贴近生活）
+六、板书设计（图文结合，关键词醒目）
+七、教学反思（预设学生易错点与改进办法）""",
+    "初中教案模板": """请按以下结构生成初中教案（初一至初三），突出学法指导和例题示范：
+一、教学目标
+1. 知识与技能
+2. 过程与方法
+3. 情感态度与价值观
+二、教学重点
+三、教学难点
+四、教学准备
+五、教学过程
+1. 导入新课（联系旧知或生活情境）
+2. 学法指导（本课怎么学：阅读方法、笔记要点、易混点辨析）
+3. 例题讲解（精选 2-3 道典型例题，写清分析思路与规范步骤）
+4. 讲授新知（概念—性质—应用，逐层推进）
+5. 课堂练习（基础巩固 + 变式训练）
+6. 课堂小结（知识结构 + 方法归纳）
+7. 作业布置（分层布置，兼顾巩固与拓展）
+六、板书设计（知识结构图 + 关键结论）
+七、教学反思（预设错误类型与补救措施）""",
+    "高中教案模板": """请按以下结构生成高中教案（高一至高三），突出考点分析与能力提升：
+一、教学目标
+1. 知识与技能
+2. 过程与方法
+3. 情感态度与价值观
+二、教学重点
+三、教学难点
+四、教学准备
+五、教学过程
+1. 导入新课（问题驱动或考点引入）
+2. 高考考点分析（本课在高考中的考查方式、常见题型与分值分布）
+3. 讲授新知（概念辨析 + 推导过程 + 规范表达）
+4. 例题讲解（含高考真题或改编题，写明解题策略）
+5. 能力提升（设置一道综合题，训练迁移与建模能力）
+6. 课堂小结（知识网络 + 思想方法）
+7. 作业布置（基础题 + 综合题，控制总量）
+六、板书设计（推导主线 + 方法总结）
+七、教学反思（预设思维障碍与突破办法）""",
 }
 OLD_BUILTIN_LESSON_TEMPLATE_NAMES = {"语文模板", "数学模板"}
 
@@ -83,22 +137,24 @@ def _lesson_default() -> dict:
 
 
 def list_lesson_templates() -> list[dict]:
-    """返回通用模板和自定义教案模板；旧语文/数学内置模板不再显示。"""
+    """返回内置模板和自定义教案模板；旧语文/数学内置模板不再显示。
+
+    v3.5.2：内置模板始终以代码里的最新正文补齐（老用户的
+    data/lesson_templates.json 也能看到新增的小学/初中/高中模板），
+    内置在前、自定义在后。
+    """
     with _LOCK:
         data = _read_json(LESSON_TEMPLATES_PATH, _lesson_default())
-    raw_templates = data.get("templates", [])
-    templates = []
-    for item in raw_templates:
+    templates = [{"name": name, "content": content, "builtin": True}
+                 for name, content in BUILTIN_LESSON_TEMPLATES.items()]
+    seen = set(BUILTIN_LESSON_TEMPLATES)
+    for item in data.get("templates", []):
         if not isinstance(item, dict) or not item.get("name"):
             continue
         name = str(item.get("name"))
-        if name in OLD_BUILTIN_LESSON_TEMPLATE_NAMES:
+        if name in OLD_BUILTIN_LESSON_TEMPLATE_NAMES or name in seen:
             continue
-        if name == "通用模板":
-            # 持久化文件可能是旧结构，界面统一使用当前通用模板。
-            item = dict(item)
-            item["content"] = BUILTIN_LESSON_TEMPLATES["通用模板"]
-            item["builtin"] = True
+        seen.add(name)
         templates.append(item)
     return templates
 
@@ -124,20 +180,20 @@ def save_custom_lesson_template(name: str, content: str) -> None:
 
     with _LOCK:
         data = _read_json(LESSON_TEMPLATES_PATH, _lesson_default())
-        templates = []
+        # v3.5.2：内置模板统一写入代码里的最新正文，顺带清掉旧内置语文/数学模板。
+        templates = [{"name": item_name, "content": item_content,
+                      "builtin": True}
+                     for item_name, item_content in BUILTIN_LESSON_TEMPLATES.items()]
         for item in data.get("templates", []):
             if not isinstance(item, dict) or not item.get("name"):
                 continue
             item_name = str(item.get("name"))
-            # 下次保存自定义模板时，顺手清掉旧内置语文/数学模板。
             if item_name in OLD_BUILTIN_LESSON_TEMPLATE_NAMES:
+                continue
+            if item_name in BUILTIN_LESSON_TEMPLATES:
                 continue
             if item_name == name and not item.get("builtin"):
                 continue
-            if item_name == "通用模板":
-                item = dict(item)
-                item["content"] = BUILTIN_LESSON_TEMPLATES["通用模板"]
-                item["builtin"] = True
             templates.append(item)
         templates.append({"name": name, "content": content, "builtin": False})
         data["templates"] = templates

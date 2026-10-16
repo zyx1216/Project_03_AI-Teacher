@@ -36,7 +36,8 @@ def template_paths(tmp_path, monkeypatch):
 
 def test_lesson_template_defaults_and_custom_save(template_paths):
     names = [item["name"] for item in template_service.list_lesson_templates()]
-    assert names == ["通用模板"]
+    # v3.5.2：内置 4 个学段模板
+    assert names == ["通用模板", "小学教案模板", "初中教案模板", "高中教案模板"]
 
     template_service.save_custom_lesson_template("复习课模板", "先回顾，再练习。")
     names = [item["name"] for item in template_service.list_lesson_templates()]
@@ -50,7 +51,9 @@ def test_lesson_template_corrupt_json_falls_back(template_paths):
     path = template_paths["lesson"]
     path.write_text("{坏JSON", encoding="utf-8")
 
-    assert template_service.list_lesson_templates() == []
+    # v3.5.2：JSON 损坏时内置模板仍从代码给出，且不覆盖损坏文件
+    assert [t["name"] for t in template_service.list_lesson_templates()] == [
+        "通用模板", "小学教案模板", "初中教案模板", "高中教案模板"]
     template_service.save_custom_lesson_template("临时模板", "正文")
     assert path.read_text(encoding="utf-8") == "{坏JSON"
     assert template_service.lesson_template_content("临时模板") == "正文"

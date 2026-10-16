@@ -88,7 +88,8 @@ def _assert_dataframe_shape(df):
     by_name = {r["name"]: r for r in scores}
     assert by_name["学生01"]["scores"]["数学"] == 88.0
     assert by_name["学生03"]["scores"]["数学"] is None
-    assert any("缺分科目：数学" in p for p in by_name["学生03"]["problems"])
+    # v3.5.2：空白单元格 = 未录分
+    assert any("数学 - 未录分" in p for p in by_name["学生03"]["problems"])
 
 
 def test_docx_score_dataframe(tmp_path):
@@ -160,7 +161,7 @@ def test_preview_round_trip():
         {"row_no": 2, "name": "甲", "class_name": "一班",
          "scores": {"数学": 90.0}, "problems": []},
         {"row_no": 3, "name": "乙", "class_name": None,
-         "scores": {"数学": None}, "problems": ["缺分科目：数学"]},
+         "scores": {"数学": None}, "problems": ["数学 - 未录分"]},
     ]
     frame, subjects = eh.scores_preview_frame(records)
     assert subjects == ["数学"]
@@ -168,7 +169,7 @@ def test_preview_round_trip():
     back = eh.preview_to_records(frame, subjects)
     assert back[0]["name"] == "甲" and back[0]["scores"]["数学"] == 90.0
     assert back[1]["name"] == "乙" and back[1]["scores"]["数学"] is None
-    assert any("缺分科目：数学" in p for p in back[1]["problems"])
+    assert any("数学 - 未录分" in p for p in back[1]["problems"])
     # 老师在预览里改分
     edited = frame.copy()
     edited.loc[0, "数学"] = "95"

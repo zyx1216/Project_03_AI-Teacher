@@ -80,7 +80,8 @@ def test_missing_score_becomes_none():
     records = eh.extract_scores(df, det)
     zhang = [r for r in records if r["name"] == "张三"][0]
     assert zhang["scores"]["数学"] is None
-    assert any("缺分科目" in p for p in zhang["problems"])
+    # v3.5.2：空白单元格 = 未录分（旧文案"缺分科目"已拆成缺考/未录分）
+    assert any("数学 - 未录分" in p for p in zhang["problems"])
 
 
 def test_extract_students_skips_blank_rows():

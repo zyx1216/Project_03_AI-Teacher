@@ -164,6 +164,10 @@ def _format_question_content(text: str, question_type: str = "solution") -> str:
 
     # 选择题：识别选项A/B/C/D，格式化对齐
     if question_type == "choice":
+        if len(lines) == 1:
+            # v3.5.2：内联写法（A. … B. … C. … D. …）也拆成每行一个，
+            # 与 Word / PDF 导出同一口径。
+            lines = qs.choice_option_lines(text)
         for line in lines:
             line = line.strip()
             if not line:
@@ -1123,7 +1127,15 @@ def tab_lesson():
     template_names.append("导入自定义模板")
     template_name = st.selectbox("教案模板", template_names,
                                  key="lesson_template_select")
-    if template_name == "导入自定义模板":
+    # v3.5.2：内置模板可一键另存为自定义——正文预填进弹窗，改完换个名字保存。
+    _save_as = st.button(
+        "📋 基于当前模板另存为自定义",
+        key="lesson_template_save_as",
+        disabled=template_name == "导入自定义模板")
+    if _save_as:
+        st.session_state["custom_lesson_template_text"] = (
+            template_service.lesson_template_content(template_name))
+    if _save_as or template_name == "导入自定义模板":
         _import_lesson_template_dialog()
 
     # v3.3.1：生成教案改走后台上任务，切换页面不中断。

@@ -259,7 +259,6 @@ def _render_html(report) -> str:
     <table border=1 cellspacing=0 cellpadding=6 width='100%'>
     <tr><th>学科</th><th>分数</th><th>满分</th><th>得分率</th>
     <th>班级排名</th><th>年级排名</th><th>评价</th></tr>{rows}</table>
-    <p>{html.escape(report['subjects'])}</p>
     <h2>优点与进步</h2><p>{html.escape(report['strengths'])}</p>
     <h2>需要改进</h2><p>{html.escape(report['improvements'])}</p>
     <h2>家庭配合建议</h2><p>{html.escape(report['family_advice'])}</p>

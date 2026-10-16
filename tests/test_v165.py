@@ -30,8 +30,10 @@ def tasks_path(tmp_path, monkeypatch):
 # 教案模板
 # ---------------------------------------------------------------------------
 
-def test_builtin_lesson_template_only_general(lesson_template_path):
-    assert list(template_service.BUILTIN_LESSON_TEMPLATES) == ["通用模板"]
+def test_builtin_lesson_templates_cover_all_stages(lesson_template_path):
+    # v3.5.2：内置模板从 1 个"通用模板"扩到 4 个学段模板
+    assert list(template_service.BUILTIN_LESSON_TEMPLATES) == [
+        "通用模板", "小学教案模板", "初中教案模板", "高中教案模板"]
     content = template_service.BUILTIN_LESSON_TEMPLATES["通用模板"]
     for text in (
         "知识与技能", "过程与方法", "情感态度与价值观",
@@ -41,8 +43,17 @@ def test_builtin_lesson_template_only_general(lesson_template_path):
     ):
         assert text in content
 
+    for name, extra in (("小学教案模板", "游戏活动"),
+                        ("初中教案模板", "学法指导"),
+                        ("高中教案模板", "高考考点分析")):
+        body = template_service.BUILTIN_LESSON_TEMPLATES[name]
+        assert extra in body
+        for text in ("教学目标", "教学重点", "教学难点", "教学准备",
+                     "教学过程", "板书设计", "教学反思"):
+            assert text in body
+
     names = [item["name"] for item in template_service.list_lesson_templates()]
-    assert names == ["通用模板"]
+    assert names == ["通用模板", "小学教案模板", "初中教案模板", "高中教案模板"]
 
 
 def test_old_builtin_lesson_templates_are_filtered(lesson_template_path):
@@ -58,7 +69,8 @@ def test_old_builtin_lesson_templates_are_filtered(lesson_template_path):
         encoding="utf-8")
 
     items = template_service.list_lesson_templates()
-    assert [item["name"] for item in items] == ["通用模板", "我的模板"]
+    assert [item["name"] for item in items] == [
+        "通用模板", "小学教案模板", "初中教案模板", "高中教案模板", "我的模板"]
     assert template_service.lesson_template_content("语文模板") == ""
     assert template_service.lesson_template_content("我的模板") == "自定义正文"
 
@@ -77,7 +89,9 @@ def test_saving_custom_template_cleans_old_builtins(lesson_template_path):
     template_service.save_custom_lesson_template("新模板", "新正文")
     raw = json.loads(lesson_template_path.read_text(encoding="utf-8"))
     names = [item["name"] for item in raw["templates"]]
-    assert names == ["我的模板", "新模板"]
+    # v3.5.2：落盘时补齐内置模板，自定义排在其后
+    assert names == ["通用模板", "小学教案模板", "初中教案模板",
+                     "高中教案模板", "我的模板", "新模板"]
     assert "语文模板" not in names and "数学模板" not in names
 
 

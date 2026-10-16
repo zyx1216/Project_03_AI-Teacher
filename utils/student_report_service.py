@@ -173,7 +173,7 @@ def _build_advice(stu, trend, weak, help_text=None, chat_func=None) -> str:
 def render_student_report_html(report: dict) -> str:
     """报告 HTML（供预览与 PDF）。"""
     s = report or {}
-    parts = [f"<h1>{_esc(s.get('name'))} 学情报告</h1>"]
+    parts = [f"<h1>{_esc(s.get('name'))}的学情报告</h1>"]
     if s.get("class_name"):
         parts.append(f"<p class='muted'>班级：{_esc(s['class_name'])}</p>")
     parts.append("<h2>成绩概览</h2>")

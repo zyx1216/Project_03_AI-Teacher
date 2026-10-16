@@ -475,6 +475,10 @@ def _split_choice_options(text: str) -> list[str]:
     return parts
 
 
+# v3.5.2：对外公开同一套选项拆分，Word / PDF / 页面预览共用
+choice_option_lines = _split_choice_options
+
+
 def questions_by_selected_ids(questions: list[Question], selected_ids) -> list[Question]:
     """
     按 selected_ids 的顺序返回题目；数据库结果中不存在的 id 自动跳过。

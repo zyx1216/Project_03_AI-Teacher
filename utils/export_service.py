@@ -676,7 +676,9 @@ def _exam_html(homework, pairs, *, school: str = "", with_answer: bool = False,
         score = scores.get(question.id)
         score_txt = f"{float(score):g}分" if score else ""
         content = str(question.content or "")
-        option_lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        # v3.5.2：与 Word 导出同一套拆分，内联 A.…D.… 也逐行一个
+        option_lines = [ln.strip() for ln in qs.choice_option_lines(content)
+                        if ln.strip()]
         if with_answer:
             head = (f"{index}.（{score_txt}）" if score_txt else f"{index}.")
             parts.append(f"<p class='q'><b>{html.escape(head)}</b></p>")
