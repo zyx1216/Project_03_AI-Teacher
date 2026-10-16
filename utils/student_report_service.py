@@ -24,9 +24,33 @@ def _score_trend(session, student_id):
     for r in rows:
         if not isinstance(r, dict):
             continue
+        full_scores = r.get("full_scores") or {}
+        full_total = sum(float(v) for v in full_scores.values()
+                         if v is not None) or None
+        total = r.get("total")
+        rate = None
+        if full_total and total is not None:
+            try:
+                rate = float(total) / float(full_total)
+            except (TypeError, ValueError, ZeroDivisionError):
+                rate = None
+        ranks = {"class_rank": None, "class_size": 0,
+                 "grade_rank": None, "grade_size": 0}
+        exam_id = r.get("exam_id")
+        if exam_id:
+            try:
+                ranks = exam_service.student_ranks(session, exam_id, student_id)
+            except Exception:  # noqa: BLE001 —— 排名失败不影响报告
+                pass
         out.append({"exam": r.get("exam_name") or r.get("name") or "",
                     "date": str(r.get("exam_date") or r.get("date") or ""),
-                    "total": r.get("total"),
+                    "total": total,
+                    "full_total": full_total,
+                    "rate": rate,
+                    "class_rank": ranks.get("class_rank"),
+                    "class_size": ranks.get("class_size"),
+                    "grade_rank": ranks.get("grade_rank"),
+                    "grade_size": ranks.get("grade_size"),
                     "subjects": r.get("subjects") or {}})
     return out
 
@@ -117,9 +141,16 @@ def generate_student_report(session, student_id: int, chat_func=None) -> dict:
 
 def _build_advice(stu, trend, weak, help_text=None, chat_func=None) -> str:
     """学习建议：AI 优先，失败给确定性兜底。"""
-    weak_text = "、".join(w["knowledge_point"] for w in weak) or "暂无明确薄弱点"
-    fallback = (f"{stu.name}近期薄弱点：{weak_text}。"
-                "建议先补基础概念，再做同类变式练习，每两天一次小过关。")
+    weak_names = [w["knowledge_point"] for w in (weak or [])]
+    weak_text = "、".join(weak_names) or "暂无明确薄弱点"
+    # v3.5.1：有/无薄弱点分开措辞，避免"无薄弱点却建议补基础"的自相矛盾。
+    if weak_names:
+        fallback = (f"{stu.name}近期薄弱点：{weak_text}。"
+                    f"建议重点复习：{'、'.join(weak_names)}；"
+                    "先回看例题，再做同类变式练习，每两天一次小过关。")
+    else:
+        fallback = (f"{stu.name}各科表现均衡，建议保持；"
+                    "继续保持优势科目，适当拓展提高。")
     if chat_func is None:
         try:
             from utils import llm_client
@@ -148,11 +179,23 @@ def render_student_report_html(report: dict) -> str:
     parts.append("<h2>成绩概览</h2>")
     if s.get("trend"):
         rows = "".join(
-            f"<tr><td>{_esc(t.get('exam'))}</td><td>{_esc(t.get('date'))}</td>"
-            f"<td>{_fmt(t.get('total'))}</td></tr>" for t in s["trend"][:10])
-        parts.append("<table border='1' cellpadding='4'>"
-                     "<tr><th>考试</th><th>日期</th><th>总分</th></tr>"
-                     f"{rows}</table>")
+            f"<tr><td>{_esc(t.get('exam'))}</td>"
+            f"<td style='text-align:center'>{_esc(t.get('date'))}</td>"
+            f"<td style='text-align:right'>{_fmt(t.get('total'))}</td>"
+            f"<td style='text-align:right'>{_fmt(t.get('full_total'))}</td>"
+            f"<td style='text-align:right'>"
+            f"{_pct(t.get('rate')) if t.get('rate') is not None else '—'}</td>"
+            f"<td style='text-align:center'>"
+            f"{_rank_text(t.get('class_rank'), t.get('class_size'))}</td>"
+            f"<td style='text-align:center'>"
+            f"{_rank_text(t.get('grade_rank'), t.get('grade_size'))}</td></tr>"
+            for t in s["trend"][:10])
+        parts.append(
+            "<table border='1' cellpadding='4' "
+            "style='width:100%;table-layout:fixed;border-collapse:collapse'>"
+            "<tr><th>考试</th><th>日期</th><th>总分</th><th>满分</th>"
+            "<th>得分率</th><th>班级排名</th><th>年级排名</th></tr>"
+            f"{rows}</table>")
     else:
         parts.append("<p class='muted'>暂无考试成绩数据。</p>")
     parts.append("<h2>知识点掌握</h2>")
@@ -183,17 +226,32 @@ def render_student_report_html(report: dict) -> str:
     return "".join(parts)
 
 
+def _rank_text(rank, size) -> str:
+    """排名显示：5/45；没有排名给 —（v3.5.1）。"""
+    if not rank:
+        return "—"
+    return f"{rank}/{size}" if size else str(rank)
+
+
 def _esc(value) -> str:
     import html
     return html.escape(str(value if value is not None else "—"))
 
 
 def _fmt(value):
-    return "—" if value is None else value
+    """数字统一格式：整数去 .0，小数最多一位（v3.5.1）。"""
+    if value is None:
+        return "—"
+    if isinstance(value, float):
+        return f"{value:g}" if value == int(value) else f"{value:.1f}"
+    if isinstance(value, int):
+        return str(value)
+    return value
 
 
 def _pct(rate):
-    return "—" if rate is None else f"{float(rate) * 100:.0f}%"
+    """得分率保留一位小数（v3.5.1）。"""
+    return "—" if rate is None else f"{float(rate) * 100:.1f}%"
 
 
 def _pdf_archive():

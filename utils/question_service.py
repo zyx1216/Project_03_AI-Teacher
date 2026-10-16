@@ -552,6 +552,7 @@ EXAM_SIZE_SCHOOL = 22.0       # 二号
 EXAM_SIZE_TITLE = 26.0        # 一号
 EXAM_SIZE_BODY = 12.0         # 小四
 EXAM_SIZE_NOTICE = 9.0
+EXAM_SIZE_SEAL = 10.5         # 密封线文字按规范 10.5pt
 EXAM_SEAL_TEXT = "密封线内不要答题"
 SCHOOL_NAME_PLACEHOLDER = "＿＿＿＿＿＿＿＿"
 
@@ -663,7 +664,7 @@ def _build_exam_header(doc, title: str, exam_meta: dict,
         seal_par = seal_cell.paragraphs[0]
         seal_par.alignment = WD_ALIGN_PARAGRAPH.CENTER
         _set_run_font(seal_par.add_run(_stacked_text(EXAM_SEAL_TEXT)),
-                      EXAM_FONT_BODY, EXAM_SIZE_NOTICE)
+                      EXAM_FONT_BODY, EXAM_SIZE_SEAL)
         _set_dashed = _set_cell_dashed_right_border(seal_cell)
         info_par = info_cell.paragraphs[0]
         _set_run_font(info_par.add_run(

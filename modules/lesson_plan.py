@@ -514,7 +514,8 @@ def _material_detail():
             st.rerun()
         chapter_titles = []
         for chapter in json.loads(tb.chapter_info or "[]"):
-            title = chapter.get("title")
+            # v3.5.1：优先显示 display_title（父章 > 子节），旧数据回退 title
+            title = chapter.get("display_title") or chapter.get("title")
             if title:
                 chapter_titles.append(title)
         # 章节较多时分两列摆放按钮
@@ -951,8 +952,8 @@ def _preview_pending():
                 type=mts.normalize_type(
                     st.session_state.get("material_import_type")),
                 chapter_info=json.dumps(
-                    [{"title": c["title"], "length": len(c.get("content") or "")}
-                     for c in chapters], ensure_ascii=False),
+                    [_chapter_info_item(c) for c in chapters],
+                    ensure_ascii=False),
                 vectorized=False)
             session.add(tb)
             session.commit()
@@ -1298,8 +1299,35 @@ def _on_lesson_material_change():
     st.session_state["lesson_chapter_select"] = []
 
 
-def _load_material_chapter_titles(material_id):
-    """从数据库chapter_info读取章节标题；读取失败时回退到文本提取。"""
+def _chapter_info_item(chapter: dict) -> dict:
+    """把 split_chapters 的一条结果整理成 chapter_info 存储项（v3.5.1）。"""
+    raw = chapter.get("raw_title") or chapter.get("title") or ""
+    return {
+        "title": chapter.get("title") or raw,
+        "raw_title": raw,
+        "display_title": chapter.get("display_title") or raw,
+        "level": chapter.get("level") or 1,
+        "parent": chapter.get("parent"),
+        "is_review": bool(chapter.get("is_review")),
+        "length": len(chapter.get("content") or ""),
+    }
+
+
+def _normalize_chapter_item(item: dict) -> dict:
+    """统一 chapter_info / split_chapters 条目，旧数据回退 title/一级。"""
+    raw = item.get("raw_title") or item.get("title") or ""
+    return {
+        "title": item.get("title") or raw,
+        "raw_title": raw,
+        "display_title": item.get("display_title") or raw,
+        "level": item.get("level") or 1,
+        "parent": item.get("parent"),
+        "is_review": bool(item.get("is_review")),
+    }
+
+
+def _load_material_chapters(material_id):
+    """读取资料章节条目（含 display_title/raw_title/level）；失败回退文本提取。"""
     if material_id is None:
         return []
     with SessionLocal() as session:
@@ -1310,25 +1338,35 @@ def _load_material_chapter_titles(material_id):
         if book.chapter_info:
             try:
                 info = json.loads(book.chapter_info)
-                titles = [item.get("title") for item in info if item.get("title")]
-                if titles:
-                    return titles
+                items = [_normalize_chapter_item(item) for item in info
+                         if isinstance(item, dict)]
+                items = [it for it in items if it.get("display_title")]
+                if items:
+                    return items
             except (json.JSONDecodeError, TypeError):
                 pass
     # 回退：从文本文件提取
     path = _text_file_path(material_id)
     if path.exists():
-        return [c["title"] for c in material.split_chapters(path.read_text(encoding="utf-8"))]
+        return material.split_chapters(path.read_text(encoding="utf-8"))
     return []
 
 
+def _load_material_chapter_titles(material_id):
+    """章节显示标题列表；优先 display_title，旧数据回退 title（v3.5.1）。"""
+    return [it.get("display_title") or it.get("title")
+            for it in _load_material_chapters(material_id)
+            if it.get("display_title") or it.get("title")]
+
+
 def _chapter_content_map(material_id):
-    """根据数据库章节标题，从全文中切分各章节内容，返回 {标题: 内容}。
+    """根据数据库章节条目，从全文中切分各章节内容，返回 {显示标题: 内容}。
     核心：用数据库确认过的章节标题作为锚点定位，避免 split_chapters
-    把"练一练"等小标题误当章节。"""
-    titles = _load_material_chapter_titles(material_id)
+    把"练一练"等小标题误当章节。v3.5.1：正文锚点用 raw_title，
+    返回键用 display_title，保证"选项值=映射键"一致。"""
+    items = _load_material_chapters(material_id)
     path = _text_file_path(material_id)
-    if not titles or not path.exists():
+    if not items or not path.exists():
         return {}
     full_text = path.read_text(encoding="utf-8")
 
@@ -1336,20 +1374,24 @@ def _chapter_content_map(material_id):
     # 标题可能在目录和正文都出现，目录通常位于全文前 25%，
     # 因此正文锚点优先取 25% 之后的第一次出现；找不到再退回第一次出现。
     skip_pos = int(len(full_text) * 0.25)
-    anchors = []  # [(位置, 标题)]
-    for title in titles:
-        body_pos = full_text.find(title, skip_pos)
+    anchors = []  # [(位置, 返回键)]
+    for it in items:
+        key = it.get("display_title") or it.get("title")
+        raw = it.get("raw_title") or it.get("title")
+        if not key or not raw:
+            continue
+        body_pos = full_text.find(raw, skip_pos)
         if body_pos == -1:
-            body_pos = full_text.find(title)
+            body_pos = full_text.find(raw)
         if body_pos != -1:
-            anchors.append((body_pos, title))
+            anchors.append((body_pos, key))
     anchors.sort(key=lambda x: x[0])
 
     # 按锚点位置顺序切分，章节内容到下一个锚点为止
     result = {}
-    for i, (pos, title) in enumerate(anchors):
+    for i, (pos, key) in enumerate(anchors):
         end = anchors[i + 1][0] if i + 1 < len(anchors) else len(full_text)
-        result[title] = full_text[pos:end].strip()
+        result[key] = full_text[pos:end].strip()
     return result
 
 

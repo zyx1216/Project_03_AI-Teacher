@@ -39,7 +39,7 @@ def _query(db_file, sql: str):
 # ---------------------------------------------------------------------------
 
 def test_version_and_tables_unchanged():
-    assert config.APP_VERSION == "3.5.0"
+    assert config.APP_VERSION == "3.5.1"
     assert len(Base.metadata.tables) == 38
 
 

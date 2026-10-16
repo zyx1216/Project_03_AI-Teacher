@@ -2,6 +2,20 @@
 
 > 项目长期记忆：架构决策、设计取舍、踩过的坑、我的纠正、重要外部资源。
 > 规则：不记密钥/密码/Token（只记"密钥放在哪里"）；代码里一眼能看出来的东西不抄；最新记录置顶。
+## v3.5.1（中严重度问题修复）新增
+- 架构决策（2026-10-16）：
+  - **章节条目结构**：`material_service.split_chapters` 每条 = `{title, raw_title, display_title, level, parent, is_review, content}`。level：第X章/单元/节=1、X.X=2、X.X.X=3；review 小节强制 level=2。**空条目一律丢弃**（含空的一级标题——它只作为子节 parent 出现在 display_title 里），目录行（`is_toc_line`：标题+点线+页码）跳过且不计入内容。`is_chapter_heading` 语义**不变**（仍只判标题）。
+  - **chapter_info 不迁移**：`textbooks.chapter_info` 仍是一个 JSON，多存 `raw_title/display_title/level/parent/is_review/length`；旧数据没有这些字段时消费方回退 title/一级。**没有加数据库列、没有迁移脚本**。
+  - **消费方铁律**：`_chapter_content_map` 用 `raw_title` 在正文里找锚点、用 `display_title` 当返回 key；`_load_material_chapter_titles` 返回 display_title。所以**下拉选项值必须等于映射键**，否则备课会报「未匹配到章节内容」。资料详情页章节按钮也用 display_title。
+  - **满分来源**：导入成绩页用 `full_score_service.get_grade_default_full_scores`（小学100/初中语数英120/高中语数英150、其他100）或该考试已填逐科满分；`extract_scores(..., full_scores=)` 只在这两个入口传值，**不传不做校验**（保持旧调用兼容）。
+  - **排名现算**：`exam_service.student_ranks(session, exam_id, student_id, subject=None)`，并列同名次用 `_competition_ranks`（1,1,3）；报告生成时算、不落库；`Exam.grade` 为空只给班级排名。
+  - **Word 字体**：教案 `lesson_service._set_doc_style_font` = Normal 宋体12pt+1.5倍行距 / Title 黑体16pt加粗 / H1 黑体14pt加粗 / H2 宋体12pt加粗（中文走 `w:eastAsia`）。试卷 `EXAM_SIZE_SEAL=10.5`（密封线文字），学校名22pt/大标题26pt 保留。`export_service.docx_from_school_template` **只替换文本、不动字体**。
+- 踩坑（2026-10-16）：
+  - **空一级标题该丢还是该留**：指令原话是"空章节丢弃"，我一开始实现成"有子节的空父章保留"，导致章节下拉里出现没有内容的「第一章 有理数」。正确做法是**空条目一律丢**，父章标题通过子节的 `display_title` 体现；`test_materials`/`test_v164` 的旧断言要同步改。
+  - **`parent_report_service._recent_scores` 少了 `exam_id`**：v3.5.1 给 `_facts` 加按科排名时 `item["exam_id"]` 直接 KeyError，生成家长报告整个崩；补字段后正常。以后给快照函数加消费字段，先确认上游 dict 里真有。
+  - AppTest/测试里造"负分成绩表"要**至少留一行正常分数**，否则 `detect_score_columns` 识别不到该科、`extract_scores` 直接没有这个键。
+- 验证（2026-10-16）：全量 **1213 passed / 0 failed**（全绿）。
+
 ## v3.5.0（高严重度问题修复）新增
 - 架构决策（2026-10-16）：
   - **试卷导出单一实现**：`question_service.export_questions_word(..., exam_meta=None, question_scores=None)` 是唯一外壳；`exam_meta` 非空才输出标准试卷（学校名/密封线/注意事项/逐题分值/得分栏），为空保持「习题卷」原样（普通作业、题库导出）。`export_service.standard_exam_docx` 只是薄封装；`export_service.exam_pdf` 用 PyMuPDF Story 与 Word 同内容；`homework_latex` 按 `homework_type=="exam"` 补要素。

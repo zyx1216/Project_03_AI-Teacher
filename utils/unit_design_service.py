@@ -28,7 +28,12 @@ def list_unit_candidates(session, subject=None, grade=None, textbook_id=None):
         except (TypeError, json.JSONDecodeError):
             chapters = []
         for chapter in chapters if isinstance(chapters, list) else []:
-            title = str(chapter.get("title") or "").strip() if isinstance(chapter, dict) else str(chapter).strip()
+            if isinstance(chapter, dict):
+                # v3.5.1：优先显示带父章路径的 display_title，旧数据回退 title
+                title = str(chapter.get("display_title")
+                            or chapter.get("title") or "").strip()
+            else:
+                title = str(chapter).strip()
             if title:
                 result.append({"textbook_id": book.id, "textbook_name": book.name,
                                "chapter": title, "grade": book.grade or ""})

@@ -732,3 +732,62 @@ def build_score_report_xlsx(session, exam_id: int,
     buffer = io.BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# v3.5.1：报告用的排名（现算，不落库）
+# ---------------------------------------------------------------------------
+
+def _competition_ranks(values: list[tuple[int, float]]) -> dict[int, int]:
+    """并列同名次（1,1,3）的竞赛式排名：输入 [(student_id, 分数)]。"""
+    ordered = sorted(values, key=lambda item: item[1], reverse=True)
+    ranks: dict[int, int] = {}
+    last_score = None
+    last_rank = 0
+    for index, (student_id, score) in enumerate(ordered, start=1):
+        if last_score is None or score != last_score:
+            last_rank = index
+            last_score = score
+        ranks[student_id] = last_rank
+    return ranks
+
+
+def student_ranks(session, exam_id: int, student_id: int,
+                  subject: str | None = None) -> dict:
+    """某学生在一场考试里的班级排名与"全体（年级）"排名，现算不落库。
+
+    subject 为空时按总分（各科之和）排名；班级池取同学 class_name，
+    "年级"池取该场考试的全体学生（学生表没有年级字段，考试通常按年级组织）。
+    返回 {class_rank, class_size, grade_rank, grade_size}。
+    """
+    from models.models import Exam, Score, Student
+
+    exam = session.get(Exam, int(exam_id))
+    target = session.get(Student, int(student_id))
+    if exam is None or target is None:
+        return {"class_rank": None, "class_size": 0,
+                "grade_rank": None, "grade_size": 0}
+
+    query = (session.query(Score.student_id, Score.score, Student.class_name)
+             .join(Student, Score.student_id == Student.id)
+             .filter(Score.exam_id == int(exam_id)))
+    if subject:
+        query = query.filter(Score.subject == subject)
+    totals: dict[int, float] = {}
+    classes: dict[int, str | None] = {}
+    for sid, score, class_name in query.all():
+        if score is None:
+            continue
+        totals[int(sid)] = totals.get(int(sid), 0.0) + float(score)
+        classes[int(sid)] = class_name
+
+    all_ranks = _competition_ranks(list(totals.items()))
+    same_class = {sid: value for sid, value in totals.items()
+                  if classes.get(sid) == target.class_name}
+    class_ranks = _competition_ranks(list(same_class.items()))
+    return {
+        "class_rank": class_ranks.get(int(student_id)),
+        "class_size": len(same_class),
+        "grade_rank": all_ranks.get(int(student_id)),
+        "grade_size": len(totals),
+    }

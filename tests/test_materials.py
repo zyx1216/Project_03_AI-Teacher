@@ -12,7 +12,12 @@ def test_split_chapters_by_chinese_heading():
     text = "第一章 有理数\n1.1 正数和负数\n第一课内容。\n第二章 整式\n整式的内容。"
     chapters = mat.split_chapters(text)
     titles = [c["title"] for c in chapters]
-    assert "第一章 有理数" in titles
+    # v3.5.1：空的一级标题不单列，但保留在子节的 display_title 里
+    assert "第一章 有理数" not in titles
+    sub = next(c for c in chapters if c["title"] == "1.1 正数和负数")
+    assert sub["level"] == 2
+    assert sub["display_title"] == "第一章 有理数 > 1.1 正数和负数"
+    assert "第一章 有理数" in sub["display_title"]
     assert "第二章 整式" in titles
     # 章内容正确归属
     second = [c for c in chapters if c["title"] == "第二章 整式"][0]

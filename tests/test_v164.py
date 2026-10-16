@@ -84,9 +84,12 @@ def test_unit_heading_followed_by_heading_not_swallowed():
     chapters = material.split_chapters(text)
     titles = [c["title"] for c in chapters]
 
-    assert "第一单元" in titles
+    # v3.5.1：空的一级标题不单列，但保留为子节的 parent（没被合并吞掉）
+    assert "第一单元" not in titles
     assert "整理与复习" in titles
     review = next(c for c in chapters if c["title"] == "整理与复习")
+    assert review["display_title"] == "第一单元 > 整理与复习"
+    assert review["is_review"] is True
     assert "复习内容" in review["content"]
 
 

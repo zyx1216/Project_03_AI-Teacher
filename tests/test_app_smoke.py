@@ -1891,7 +1891,8 @@ def test_v145_score_import_creates_new_exam_isolated(tmp_path):
         student_count = conn.execute(text("SELECT COUNT(*) FROM students")).scalar()
     assert exam["name"] == "导入即建考试"
     assert exam["term"] == "2026秋"
-    assert json.loads(exam["full_scores"]) == {"数学": 150.0}
+    # v3.5.1：新考试默认满分按年级取（默认八年级=初中 → 语数英 120）
+    assert json.loads(exam["full_scores"]) == {"数学": 120.0}
     assert score_count == 2 and student_count == 2
     eng.dispose()
 

@@ -302,24 +302,31 @@ def delete_plan(session, plan_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 def _set_doc_style_font(doc) -> None:
-    """统一 Word 默认字体和标题字体，中文走 eastAsia。"""
+    """统一 Word 默认字体和标题字体（v3.5.1 规范，中文走 eastAsia）。
+
+    Normal 宋体 12pt（小四）+ 1.5 倍行距；Title 黑体 16pt 加粗；
+    Heading 1 黑体 14pt 加粗；Heading 2 宋体 12pt 加粗。
+    """
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.shared import Pt
 
-    for style_name, size in (("Normal", 11), ("Title", 20),
-                             ("Heading 1", 15), ("Heading 2", 12)):
+    specs = (("Normal", "宋体", 12, False), ("Title", "黑体", 16, True),
+             ("Heading 1", "黑体", 14, True), ("Heading 2", "宋体", 12, True))
+    for style_name, font_name, size, bold in specs:
         style = doc.styles[style_name]
-        style.font.name = "微软雅黑"
+        style.font.name = font_name
         style.font.size = Pt(size)
+        style.font.bold = bold
         rpr = style.element.get_or_add_rPr()
         rfonts = rpr.rFonts
         if rfonts is None:
             rfonts = OxmlElement("w:rFonts")
             rpr.append(rfonts)
-        rfonts.set(qn("w:eastAsia"), "微软雅黑")
-        rfonts.set(qn("w:ascii"), "微软雅黑")
-        rfonts.set(qn("w:hAnsi"), "微软雅黑")
+        rfonts.set(qn("w:eastAsia"), font_name)
+        rfonts.set(qn("w:ascii"), font_name)
+        rfonts.set(qn("w:hAnsi"), font_name)
+    doc.styles["Normal"].paragraph_format.line_spacing = 1.5
 
 
 def _text_or_dash(value) -> str:

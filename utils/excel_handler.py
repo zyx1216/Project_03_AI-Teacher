@@ -345,10 +345,24 @@ def parse_long_table(df: pd.DataFrame) -> Optional[list[dict]]:
         return None
     return records
 
-def extract_scores(df: pd.DataFrame, detected: dict) -> list[dict]:
+def _looks_negative(value) -> bool:
+    """单元格看起来是负数（用于"分数为负"提示，_to_score 已把负分判为无效）。"""
+    if value is None:
+        return False
+    try:
+        text = str(value).strip().replace("分", "")
+        return float(text) < 0
+    except (TypeError, ValueError):
+        return False
+
+
+def extract_scores(df: pd.DataFrame, detected: dict,
+                   full_scores: dict | None = None) -> list[dict]:
     """按识别结果把成绩表提取成记录；缺姓名标问题，缺考科目分数留 None。
 
     v3.5.0：班级列同样向下填充，避免合并单元格导致成绩丢班级归属。
+    v3.5.1：传 full_scores（学科->满分）时做上限校验——超出满分的科目
+    **置空不入库**，并在问题里写明"超出满分 X，请确认"；负分同样置空并提示。
     """
     df, _filled = fill_merged_columns(df, [detected.get("class_col")])
     name_col = detected["name_col"]
@@ -359,11 +373,20 @@ def extract_scores(df: pd.DataFrame, detected: dict) -> list[dict]:
         name = _to_text(row[name_col]) if name_col else None
         scores = {}
         missing_subjects = []
+        extra_notes = []
         for col, subject in subjects:
-            value = _to_score(row[col])
-            scores[subject] = value
-            if value is None:
+            raw = row[col]
+            value = _to_score(raw)
+            limit = (full_scores or {}).get(subject)
+            if value is not None and limit and value > float(limit):
+                extra_notes.append(
+                    f"{subject} 超出满分 {float(limit):g}，请确认")
+                value = None
+            elif value is None and _looks_negative(raw):
+                extra_notes.append(f"{subject} 分数为负，请确认")
+            elif value is None:
                 missing_subjects.append(subject)
+            scores[subject] = value
         # 跳过彻底空白的行
         if not name and all(v is None for v in scores.values()):
             continue
@@ -372,6 +395,8 @@ def extract_scores(df: pd.DataFrame, detected: dict) -> list[dict]:
             problems.append("缺姓名")
         if name and missing_subjects:
             problems.append("缺分科目：" + "、".join(missing_subjects))
+        if name:
+            problems.extend(extra_notes)
         records.append({
             "row_no": row_no,
             "name": name,

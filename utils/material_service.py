@@ -27,8 +27,39 @@ _CHAPTER_PATTERNS = [
     re.compile(r"^\s*第\s*[0-9一二三四五六七八九十百零〇]+\s*[章节单元课]\s*[^\n]{0,40}$"),
     re.compile(r"^\s*[0-9]{1,2}\.[0-9]{1,2}(?:\.[0-9]{1,2})?\s+[^\n]{1,40}$"),
     re.compile(r"^\s*第\s*[0-9一二三四五六七八九十百零〇]+\s*单元\s*$"),
-    re.compile(r"^\s*(?:整理与复习|总复习|综合实践|练一练)\s*$"),
+    # v3.5.1：复习/小结类小节也识别成标题（但归属到所属章，不再独立成章）
+    re.compile(r"^\s*(?:整理与复习|总复习|本章小结|复习题|单元测试|"
+               r"综合实践|练一练)\s*$"),
 ]
+
+# v3.5.1：目录行（标题 + 点线/省略号 + 页码）与孤立"目录"标题
+_TOC_LINE_RE = re.compile(
+    r"^\s*\S[^\n]{0,60}?\s*(?:[.·…]{2,}|\.{3,})\s*\d{1,4}\s*$")
+_TOC_HEADER_RE = re.compile(r"^\s*目\s*录\s*$")
+
+# v3.5.1：复习/小结类小节（归到所属章下，标记 is_review）
+_REVIEW_TITLES = ("整理与复习", "总复习", "本章小结", "复习题",
+                  "单元测试", "综合实践", "练一练")
+
+
+def is_toc_line(line: str) -> bool:
+    """目录行：形如「第一章 有理数 …… 1」的标题+点线+页码。"""
+    return bool(_TOC_LINE_RE.match(str(line or "")))
+
+
+def _chapter_level(title: str) -> int:
+    """章节层级：第X章/节/单元 → 1；X.X → 2；X.X.X → 3。"""
+    text = str(title or "").strip()
+    if re.match(r"^[0-9]{1,2}\.[0-9]{1,2}\.[0-9]{1,2}\s+", text):
+        return 3
+    if re.match(r"^[0-9]{1,2}\.[0-9]{1,2}\s+", text):
+        return 2
+    return 1
+
+
+def _is_review_title(title: str) -> bool:
+    text = str(title or "").strip()
+    return any(text == item or text.startswith(item) for item in _REVIEW_TITLES)
 
 _UNIT_STANDALONE_RE = re.compile(
     r"^\s*第\s*[0-9一二三四五六七八九十百零〇]+\s*单元\s*$")
@@ -277,38 +308,70 @@ def _merge_unit_title_lines(lines: list[str]) -> list[str]:
 
 
 def split_chapters(text: str) -> list[dict]:
-    """
-    按章节标题切分，返回 [{"title":..., "content":...}]。
+    """按章节标题切分。
+
+    v3.5.1：①目录行（"标题+点线+页码"）不计入章节；②条目带层级
+    （level：第X章/节=1、X.X=2、X.X.X=3）与 display_title（父章 > 子节）；
+    ③"整理与复习/本章小结"等复习小节归到所属章下（is_review=True）；
+    ④真正空的章节丢弃（空的一级标题不单列，见子节的 display_title）。
     没识别到任何章节标题时，整篇作为一个章节（标题"全文"）。
     """
     if not text.strip():
         return []
     lines = _merge_unit_title_lines(text.split("\n"))
-    chapters = []
-    current_title = "全文"
-    current_lines = []
+    entries: list[dict] = []
+    current: dict | None = None
     found = False
 
+    def _flush() -> None:
+        nonlocal current
+        if current is not None:
+            current["content"] = "\n".join(current.pop("_lines")).strip()
+            entries.append(current)
+        current = None
+
     for line in lines:
+        stripped = line.strip()
+        if is_toc_line(line):
+            continue                      # 目录行不计入章节内容
+        if not found and _TOC_HEADER_RE.match(stripped):
+            continue                      # 章前孤立的"目录"标题
         if is_chapter_heading(line):
-            if current_lines or found:
-                chapters.append({
-                    "title": current_title,
-                    "content": "\n".join(current_lines).strip(),
-                })
-            current_title = line.strip()
-            current_lines = []
+            _flush()
+            title = stripped
+            review = _is_review_title(title)
+            current = {
+                "title": title, "level": 2 if review else _chapter_level(title),
+                "is_review": review, "parent": None, "_lines": [],
+            }
             found = True
         else:
-            current_lines.append(line)
-    # 收尾
-    if current_lines or not chapters:
-        chapters.append({
-            "title": current_title,
-            "content": "\n".join(current_lines).strip(),
-        })
-    # 去掉空章节
-    return [c for c in chapters if c["content"] or c["title"]]
+            if current is None:
+                current = {"title": "全文", "level": 1, "is_review": False,
+                           "parent": None, "_lines": []}
+            current["_lines"].append(line)
+    _flush()
+
+    # 归属父章：level>=2 挂到最近的一级标题下
+    last_level1 = None
+    for item in entries:
+        if item["level"] == 1:
+            last_level1 = item["title"]
+            item["parent"] = None
+        else:
+            item["parent"] = last_level1
+
+    # 丢弃空章节：空的一级标题不再单列，其标题已经作为子节的 parent
+    # 出现在 display_title 里（如"第一章 有理数 > 1.1 正数和负数"）。
+    result = []
+    for item in entries:
+        if not item["content"]:
+            continue
+        parent = item.get("parent")
+        item["display_title"] = (f"{parent} > {item['title']}"
+                                 if parent else item["title"])
+        result.append(item)
+    return result
 
 
 def chunk_text(text: str, size: int = CHUNK_SIZE,
@@ -357,9 +420,17 @@ def chunk_chapters(chapters: list[dict]) -> list[dict]:
     return chunks
 
 
-def chapter_titles(chapters: list[dict]) -> list[str]:
-    """提取章节标题列表。"""
-    return [c["title"] for c in chapters]
+def chapter_titles(chapters: list[dict],
+                   hierarchical: bool = False) -> list[str]:
+    """提取章节标题列表。
+
+    v3.5.1：hierarchical=True 时用 display_title（带"父章 > 子节"路径）；
+    默认仍返回原始 title，兼容旧调用。
+    """
+    if hierarchical:
+        return [c.get("display_title") or c.get("title") or ""
+                for c in chapters if (c.get("display_title") or c.get("title"))]
+    return [c.get("title") for c in chapters if c.get("title")]
 def extract_pdf_with_ocr(file_bytes_or_path) -> dict:
     """
     提取 PDF 文本；检测到扫描件时自动调用本地 OCR。

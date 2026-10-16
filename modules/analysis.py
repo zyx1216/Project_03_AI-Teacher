@@ -802,8 +802,19 @@ def _parse_uploaded_scores(uploaded) -> tuple[pd.DataFrame | None, str]:
     return None, "不支持的文件格式，请上传 .xlsx/.xls/.pdf/.docx/.txt。"
 
 
-def _default_full_score(subject: str) -> float:
-    """语文、数学、英语满分 150，其余科目默认 100。"""
+def _default_full_score(subject: str, grade: str | None = None) -> float:
+    """默认满分：按年级取（小学100 / 初中语数英120 / 高中语数英150，其余100）。
+
+    v3.5.1：改为复用 full_score_service 的年级默认值，和导入校验口径一致。
+    """
+    from utils import full_score_service as fss
+
+    try:
+        scores = fss.get_grade_default_full_scores(grade)
+        if subject in scores:
+            return float(scores[subject])
+    except Exception:  # noqa: BLE001 —— 取不到就退回旧口径
+        pass
     return 150.0 if subject in ("语文", "数学", "英语") else 100.0
 
 
@@ -907,7 +918,17 @@ def _score_import_panel():
         if _score_filled:
             st.info("检测到合并单元格，已自动向下填充："
                     + "、".join(_score_filled) + "，请确认数据是否正确。")
-        records = eh.extract_scores(df, detected)
+        # v3.5.1：按科目满分校验上限（新建考试用年级默认值，已有考试用其配置）
+        from utils import full_score_service as _fss
+        _check_full: dict = {}
+        if new_exam_info is not None:
+            _check_full = _fss.get_grade_default_full_scores(
+                new_exam_info.get("grade"))
+        elif exam_id is not None:
+            with SessionLocal() as _score_session:
+                _check_full = _fss.get_exam_full_scores(_score_session, exam_id)
+        records = eh.extract_scores(df, detected,
+                                    full_scores=_check_full or None)
 
     # 非标科目保留原值入库（不阻断），只提示其不计入九科分析。
     if non_standard:
@@ -922,7 +943,8 @@ def _score_import_panel():
             col = (fc1, fc2, fc3)[idx % 3]
             full_scores[subject] = col.number_input(
                 f"{subject}满分", min_value=1.0, step=10.0,
-                value=_default_full_score(subject),
+                value=_default_full_score(
+                    subject, (new_exam_info or {}).get("grade")),
                 key=f"score_new_full_{subject}")
 
     if not records:
@@ -930,6 +952,16 @@ def _score_import_panel():
         return
 
     preview, subject_cols = eh.scores_preview_frame(records)
+    # v3.5.1：分数异常（超满分/负分）已置空，单独标黄提醒修改
+    _suspect = preview[preview["问题"].str.contains(
+        "超出满分|分数为负", na=False)]
+    if len(_suspect):
+        st.markdown(f"**⚠️ 有 {len(_suspect)} 行分数异常（已置空、不会入库）：**")
+        st.dataframe(
+            _suspect.style.apply(
+                lambda _row: ["background-color:#fff3cd"] * len(_row), axis=1),
+            width="stretch", hide_index=True)
+        st.caption("请在下方表格里改成正确分数，再点「✅ 确认导入成绩」。")
     problem_count = int((preview["问题"] != "").sum())
     if problem_count:
         st.warning(f"有 {problem_count} 行提示问题（缺姓名会跳过；缺考科目不计分），请核对。")

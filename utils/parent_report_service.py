@@ -20,6 +20,44 @@ def _student(session, student_id) -> Student | None:
     return session.get(Student, student_id)
 
 
+def _band_text(rate: float | None) -> str:
+    """按得分率给文字评价（v3.5.1）。"""
+    if rate is None:
+        return ""
+    value = rate * 100 if rate <= 1 else rate
+    for threshold, label in ((90, "优秀"), (80, "良好"), (70, "中等"),
+                             (60, "及格")):
+        if value >= threshold:
+            return label
+    return "待提高"
+
+
+def _subject_reference(session, student_id: int, exam_id: int,
+                       subject: str, score) -> dict:
+    """单科参照信息：满分、得分率、班级/年级排名、文字评价（v3.5.1）。"""
+    from utils import exam_service, full_score_service
+
+    try:
+        full = full_score_service.get_subject_full_score(session, subject,
+                                                         exam_id)
+    except Exception:  # noqa: BLE001
+        full = None
+    rate = None
+    if full and score is not None:
+        try:
+            rate = float(score) / float(full)
+        except (TypeError, ValueError, ZeroDivisionError):
+            rate = None
+    ranks = {"class_rank": None, "class_size": 0,
+             "grade_rank": None, "grade_size": 0}
+    try:
+        ranks = exam_service.student_ranks(session, exam_id, student_id,
+                                           subject=subject)
+    except Exception:  # noqa: BLE001 —— 排名失败不影响报告
+        pass
+    return {"full": full, "rate": rate, "band": _band_text(rate), **ranks}
+
+
 def _recent_scores(session, student_id, exam_id=None, limit=5):
     """取学生最近若干场考试的分科成绩；exam_id 指定时只取该场。"""
     query = (session.query(Score, Exam)
@@ -33,8 +71,8 @@ def _recent_scores(session, student_id, exam_id=None, limit=5):
     for score, exam in rows:
         if exam.id not in grouped:
             grouped[exam.id] = {
-                "exam_name": exam.name, "date": exam.exam_date,
-                "subjects": {}}
+                "exam_id": exam.id, "exam_name": exam.name,
+                "date": exam.exam_date, "subjects": {}}
             order.append(exam.id)
         grouped[exam.id]["subjects"][score.subject] = score.score
     return [grouped[eid] for eid in order[:limit]]
@@ -59,16 +97,25 @@ def _facts(session, student_id, exam_id=None) -> dict:
         return {"has_student": False}
     exams = _recent_scores(session, student_id, exam_id=exam_id)
     answer_rate = _recent_answer_rate(session, student_id)
+    enriched = []
+    for item in exams:
+        details = {}
+        for subject, score in (item["subjects"] or {}).items():
+            details[subject] = dict(
+                _subject_reference(session, student_id, item["exam_id"],
+                                   subject, score),
+                score=score)
+        enriched.append({
+            "exam_id": item["exam_id"], "exam_name": item["exam_name"],
+            "date": item["date"].isoformat() if hasattr(
+                item["date"], "isoformat") else "",
+            "subjects": item["subjects"], "subject_details": details,
+        })
     return {
         "has_student": True,
         "student_name": student.name,
         "class_name": student.class_name or "未分班",
-        "exams": [
-            {"exam_name": e["exam_name"],
-             "date": e["date"].isoformat() if hasattr(
-                 e["date"], "isoformat") else "",
-             "subjects": e["subjects"]}
-            for e in exams],
+        "exams": enriched,
         "answer_rate": answer_rate,
     }
 
@@ -77,8 +124,26 @@ def _template_report(facts) -> dict:
     """无 LLM 时的确定性报告模板。"""
     exams = facts["exams"]
     latest = exams[0] if exams else None
+    def _subject_line(subject: str, score) -> str:
+        detail = ((latest or {}).get("subject_details") or {}).get(subject) or {}
+        parts = [f"{score:g}分" if isinstance(score, (int, float))
+                 else f"{score}"]
+        if detail.get("full"):
+            parts.append(f"满分{float(detail['full']):g}")
+        if detail.get("rate") is not None:
+            parts.append(f"得分率{float(detail['rate']) * 100:.1f}%")
+        if detail.get("class_rank"):
+            parts.append(
+                f"班级{detail['class_rank']}/{detail.get('class_size') or '—'}")
+        if detail.get("grade_rank"):
+            parts.append(
+                f"年级{detail['grade_rank']}/{detail.get('grade_size') or '—'}")
+        if detail.get("band"):
+            parts.append(detail["band"])
+        return f"{subject} " + "（" + "，".join(parts) + "）"
+
     subjects_text = "、".join(
-        f"{s}{v:g}分"
+        _subject_line(s, v)
         for s, v in (latest["subjects"].items() if latest else []))
 
     strengths, improvements = [], []
@@ -156,18 +221,44 @@ def _render_html(report) -> str:
     f = report.get("facts", {})
     title = f"{f.get('student_name', '')}同学家校沟通报告"
     notice = report.get("data_notice")
+    _latest = (f.get("exams") or [{}])[0]
+    _details = _latest.get("subject_details") or {}
+
+    def _cell(subject, score) -> str:
+        detail = _details.get(subject) or {}
+        score_text = (f"{score:g}" if isinstance(score, (int, float))
+                      else str(score))
+        full_text = (f"{float(detail['full']):g}"
+                     if detail.get("full") else "—")
+        rate_text = (f"{float(detail['rate']) * 100:.1f}%"
+                     if detail.get("rate") is not None else "—")
+        class_text = (f"{detail['class_rank']}/{detail.get('class_size')}"
+                      if detail.get("class_rank") else "—")
+        grade_text = (f"{detail['grade_rank']}/{detail.get('grade_size')}"
+                      if detail.get("grade_rank") else "—")
+        return ("<tr>"
+                f"<td>{html.escape(str(subject))}</td>"
+                f"<td style='text-align:right'>{html.escape(score_text)}</td>"
+                f"<td style='text-align:right'>{html.escape(full_text)}</td>"
+                f"<td style='text-align:right'>{html.escape(rate_text)}</td>"
+                f"<td style='text-align:center'>{html.escape(class_text)}</td>"
+                f"<td style='text-align:center'>{html.escape(grade_text)}</td>"
+                f"<td style='text-align:center'>"
+                f"{html.escape(detail.get('band') or '—')}</td>"
+                "</tr>")
+
     rows = "".join(
-        f"<tr><td>{html.escape(s)}</td><td>{html.escape(f'{v:g}')}</td></tr>"
-        for e in f.get("exams", [])[:1]
-        for s, v in e.get("subjects", {}).items())
+        _cell(s, v)
+        for s, v in (_latest.get("subjects") or {}).items())
     return f"""
     <h1>{html.escape(title)}</h1>
     <p class='muted'>{html.escape(f.get('class_name', ''))}</p>
     {'<p class=notice>' + html.escape(notice) + '</p>' if notice else ''}
     <h2>近期表现</h2><p>{html.escape(report['overview'])}</p>
     <h2>各科情况</h2>
-    <table border=1 cellspacing=0 cellpadding=6>
-    <tr><th>学科</th><th>分数</th></tr>{rows}</table>
+    <table border=1 cellspacing=0 cellpadding=6 width='100%'>
+    <tr><th>学科</th><th>分数</th><th>满分</th><th>得分率</th>
+    <th>班级排名</th><th>年级排名</th><th>评价</th></tr>{rows}</table>
     <p>{html.escape(report['subjects'])}</p>
     <h2>优点与进步</h2><p>{html.escape(report['strengths'])}</p>
     <h2>需要改进</h2><p>{html.escape(report['improvements'])}</p>
