@@ -1,0 +1,4 @@
+2026-10-16 18:05:24	238.5ms	PRAGMA main.table_info("students")
+2026-10-16 18:05:25	186.5ms	SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite~_%' ESCAPE '~' ORDER BY name
+2026-10-16 18:05:26	211.1ms	PRAGMA main.table_info("student_comments")
+2026-10-16 19:37:16	158.5ms	SELECT DISTINCT students.class_name AS students_class_name  FROM students  WHERE students.class_name IS NOT NULL AND students.class_name != ?
